@@ -1,0 +1,18 @@
+{
+  "name": "agent-sync",
+  "version": "0.1.0",
+  "description": "Read-only inventory and drift diagnostics for AI coding agent setup state.",
+  "type": "module",
+  "bin": {
+    "agent-sync": "./bin/agent-sync.js"
+  },
+  "scripts": {
+    "test": "node --test",
+    "doctor": "node ./bin/agent-sync.js doctor",
+    "check": "node --check ./bin/agent-sync.js && node --check ./src/classify.js && node --check ./src/diff.js && node --check ./src/doctor.js && node --check ./src/plan.js && node --check ./src/surfaces.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

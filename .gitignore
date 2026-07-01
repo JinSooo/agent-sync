@@ -1,0 +1,9 @@
+.DS_Store
+node_modules/
+coverage/
+dist/
+*.tgz
+
+# Local agent/runtime artifacts
+.omc/
+.omx/
