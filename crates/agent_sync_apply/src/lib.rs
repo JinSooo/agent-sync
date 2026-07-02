@@ -282,6 +282,32 @@ pub struct SqliteTableSummary {
     pub columns: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeSessionProjectRemapPreviewOptions {
+    pub target_home: PathBuf,
+    pub target_project: PathBuf,
+    pub source_project: Option<String>,
+    pub max_schema_tables: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeSessionProjectRemapPreviewReport {
+    pub candidates: Vec<NativeSessionProjectRemapCandidate>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeSessionProjectRemapCandidate {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub portable_path: String,
+    pub table: String,
+    pub column: String,
+    pub confidence: u8,
+    pub reason: String,
+    pub write_supported: bool,
+}
+
 pub fn create_journal(plan: &TransformPlan) -> OperationJournal {
     OperationJournal {
         id: Uuid::new_v4(),
@@ -365,6 +391,75 @@ pub fn discover_native_session_stores(
         );
     }
     NativeSessionStoreDiscoveryReport { stores, warnings }
+}
+
+pub fn preview_native_session_project_remap(
+    snapshot: &DeviceSnapshot,
+    options: &NativeSessionProjectRemapPreviewOptions,
+) -> NativeSessionProjectRemapPreviewReport {
+    let discovery = discover_native_session_stores(
+        snapshot,
+        &NativeSessionStoreDiscoveryOptions {
+            target_home: options.target_home.clone(),
+            target_project: options.target_project.clone(),
+            max_schema_tables: options.max_schema_tables,
+        },
+    );
+    let mut candidates = Vec::new();
+    for store in discovery
+        .stores
+        .into_iter()
+        .filter(|store| store.store_kind == NativeSessionStoreKind::Sqlite)
+    {
+        for table in store.tables {
+            for column in table.columns {
+                if let Some((confidence, reason)) = project_remap_column_reason(&column) {
+                    candidates.push(NativeSessionProjectRemapCandidate {
+                        agent_id: store.agent_id.clone(),
+                        agent_name: store.agent_name.clone(),
+                        portable_path: store.portable_path.clone(),
+                        table: table.name.clone(),
+                        column,
+                        confidence,
+                        reason,
+                        write_supported: false,
+                    });
+                }
+            }
+        }
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .confidence
+            .cmp(&left.confidence)
+            .then(left.agent_id.cmp(&right.agent_id))
+            .then(left.portable_path.cmp(&right.portable_path))
+            .then(left.table.cmp(&right.table))
+            .then(left.column.cmp(&right.column))
+    });
+
+    let mut warnings = discovery.warnings;
+    if options.source_project.is_none() {
+        warnings.push(
+            "source project is not provided; preview identifies schema columns only and cannot prove row-level matches"
+                .to_string(),
+        );
+    }
+    if candidates.is_empty() {
+        warnings.push(
+            "no likely project identity columns were found in discovered SQLite native stores"
+                .to_string(),
+        );
+    } else {
+        warnings.push(
+            "preview is schema-only: no database rows were read and no native DB/index writes are supported yet"
+                .to_string(),
+        );
+    }
+    NativeSessionProjectRemapPreviewReport {
+        candidates,
+        warnings,
+    }
 }
 
 pub fn session_native_import_readiness(
@@ -526,6 +621,39 @@ fn native_session_store_kind(portable_path: &str) -> Option<NativeSessionStoreKi
         Some(NativeSessionStoreKind::IndexedDb)
     } else if lower.ends_with(".log") {
         Some(NativeSessionStoreKind::Log)
+    } else {
+        None
+    }
+}
+
+fn project_remap_column_reason(column: &str) -> Option<(u8, String)> {
+    let lower = column.to_lowercase();
+    let compact = lower.replace(['_', '-'], "");
+    if compact == "projectpath" || compact == "projectroot" || compact == "workspacepath" {
+        Some((
+            95,
+            "column name directly suggests a project/workspace path".to_string(),
+        ))
+    } else if compact == "cwd" || compact == "currentworkingdirectory" {
+        Some((
+            90,
+            "column name suggests current working directory identity".to_string(),
+        ))
+    } else if compact.contains("project") && compact.contains("path") {
+        Some((85, "column name contains both project and path".to_string()))
+    } else if compact.contains("workspace") && compact.contains("path") {
+        Some((
+            80,
+            "column name contains both workspace and path".to_string(),
+        ))
+    } else if compact.ends_with("path")
+        && (compact.contains("root") || compact.contains("folder") || compact.contains("dir"))
+    {
+        Some((
+            65,
+            "path-like column may carry project identity but needs fixture confirmation"
+                .to_string(),
+        ))
     } else {
         None
     }
@@ -2641,6 +2769,100 @@ mod tests {
         assert_eq!(
             report.stores[0].tables[0].columns,
             vec!["id", "project_path", "title"]
+        );
+        assert!(!format!("{report:?}").contains("do not read row"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn previews_sqlite_project_remap_candidates_without_write_support() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-sync-native-remap-preview-{}",
+            Uuid::new_v4()
+        ));
+        let home = root.join("home");
+        let project = root.join("project");
+        let db_path = home.join(".codex").join("state").join("sessions.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection
+            .execute(
+                "CREATE TABLE conversations (id TEXT PRIMARY KEY, project_path TEXT, cwd TEXT, title TEXT)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversations (id, project_path, cwd, title) VALUES ('secret-id', '/source/project', '/source/project', 'do not read row')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let snapshot = agent_sync_core::DeviceSnapshot {
+            schema_version: "0.2".into(),
+            id: Uuid::new_v4(),
+            generated_at: Utc::now(),
+            platform: agent_sync_core::PlatformInfo {
+                os: "test".into(),
+                arch: "test".into(),
+            },
+            inputs: agent_sync_core::SnapshotInputs {
+                home: "~".into(),
+                project: project.display().to_string(),
+                max_depth: 8,
+                max_entries: 10,
+            },
+            summary: agent_sync_core::SnapshotSummary::default(),
+            projects: vec![],
+            agents: vec![agent_sync_core::AgentSnapshot {
+                id: "codex".into(),
+                name: "OpenAI Codex".into(),
+                detected: true,
+                capabilities: Default::default(),
+                roots: vec![],
+                findings: vec![agent_sync_core::Finding {
+                    path: "~/.codex/state/sessions.db".into(),
+                    portable_path: "~/.codex/state/sessions.db".into(),
+                    kind: agent_sync_core::FileKind::File,
+                    depth: 3,
+                    size: fs::metadata(&db_path).ok().map(|metadata| metadata.len()),
+                    mtime: None,
+                    safety_class: agent_sync_core::SafetyClass::Database,
+                    risk: agent_sync_core::RiskLevel::High,
+                    reason: "test fixture".into(),
+                    recommendation: "schema only".into(),
+                    truncated: false,
+                }],
+                sessions: vec![],
+            }],
+        };
+
+        let report = preview_native_session_project_remap(
+            &snapshot,
+            &NativeSessionProjectRemapPreviewOptions {
+                target_home: home,
+                target_project: project,
+                source_project: Some("/source/project".into()),
+                max_schema_tables: 10,
+            },
+        );
+
+        assert_eq!(report.candidates.len(), 2);
+        assert_eq!(report.candidates[0].column, "project_path");
+        assert!(report.candidates[0].confidence >= 90);
+        assert!(
+            report
+                .candidates
+                .iter()
+                .all(|candidate| !candidate.write_supported)
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("schema-only"))
         );
         assert!(!format!("{report:?}").contains("do not read row"));
         let _ = fs::remove_dir_all(root);

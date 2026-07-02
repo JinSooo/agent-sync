@@ -34,6 +34,7 @@ The older Node CLI remains available as a legacy reference while the Rust/Tauri 
 - Stage selected raw session payloads into an isolated native-import directory with optional source-project to target-project path rewriting.
 - Check native session import readiness before writing, including raw-payload presence, adapter capability, stopped-agent preflight posture, rollback limits, and DB/index remap gaps.
 - Discover native Codex/Claude DB/index store candidates in read-only mode, including SQLite table/column schema summaries without row contents.
+- Preview likely SQLite project-remap columns for native Codex/Claude DB/index stores in schema-only mode; the preview reports confidence and always marks writes unsupported until adapter fixtures prove safe row-level migration.
 - Import selected raw session payloads into the target home as native Codex/Claude session files, limited to `~/.codex/**` and `~/.claude/**`, with backup, path rewriting, checksum journal, default stopped-agent preflight for Codex/Claude, and native-file rollback.
 - Apply selected safe payloads with backups and checksum verification.
 - Roll back apply journals and native session import journals by restoring backed-up files or removing files that did not exist before the apply/import.
@@ -52,6 +53,7 @@ cargo run -p agent_sync_cli -- export-bundle --output agent-sync-sessions.asbund
 cargo run -p agent_sync_cli -- verify-bundle --input agent-sync-local.asbundle
 cargo run -p agent_sync_cli -- check-native-sessions --input agent-sync-sessions.asbundle --home "$HOME" --project "$PWD"
 cargo run -p agent_sync_cli -- discover-native-stores --home "$HOME" --project "$PWD" --max-depth 8 --max-entries 5000
+cargo run -p agent_sync_cli -- preview-native-remap --home "$HOME" --project "$PWD" --source-project "/source/project" --max-depth 8 --max-entries 5000
 cargo run -p agent_sync_cli -- import-native-sessions --input agent-sync-sessions.asbundle --target-home "$HOME" --target-project "$PWD" --backup-dir agent-sync-backups --session "codex:~/.codex/sessions/YYYY/MM/DD/session.jsonl"
 # Explicit override when you have manually accepted the risk of importing while the target agent may be running:
 cargo run -p agent_sync_cli -- import-native-sessions --input agent-sync-sessions.asbundle --target-home "$HOME" --target-project "$PWD" --backup-dir agent-sync-backups --session "codex:~/.codex/sessions/YYYY/MM/DD/session.jsonl" --skip-agent-stopped-check
@@ -97,6 +99,7 @@ Automatically applicable today:
 - selected raw session payloads into an isolated staging directory with project-path rewrite journal.
 - native session import readiness reports in desktop and CLI that are read-only and explicitly warn when the current adapter supports native-file import but not Codex/Claude DB/index project remap.
 - read-only native session store discovery in desktop and CLI, including SQLite schema metadata only; this is evidence gathering for future DB/index remap and does not write native stores.
+- read-only native DB/index project-remap preview in desktop and CLI, using SQLite schema column names only. It does not read database rows, does not mutate native stores, and reports every candidate with `write_supported=false`.
 - selected raw session payloads into native Codex/Claude file locations under a chosen target home, with strict `~/.codex/**` / `~/.claude/**` allowlisting, adapter capability gating, default Codex/Claude stopped-agent preflight, backup, optional project-path rewrite, checksum verification, and rollback from the native import journal. The UI exposes an explicit manual override and the CLI exposes `--skip-agent-stopped-check`; this does not rewrite native Codex/Claude databases or secondary indexes, and the adapter capability model does not claim DB/index remap support until fixtures prove it.
 
 See `.omx/plans/agent-sync-studio-full-architecture-20260701.md` and `docs/agent-sync-studio-architecture.md` for the full implementation architecture.

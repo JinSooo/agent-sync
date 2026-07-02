@@ -275,6 +275,20 @@ type NativeSessionStoreDiscoveryReport = {
   }>;
 };
 
+type NativeSessionProjectRemapPreviewReport = {
+  warnings: string[];
+  candidates: Array<{
+    agent_id: string;
+    agent_name: string;
+    portable_path: string;
+    table: string;
+    column: string;
+    confidence: number;
+    reason: string;
+    write_supported: boolean;
+  }>;
+};
+
 const safetyOrder = ['safe_config', 'memory_knowledge', 'mcp_config', 'raw_session', 'executable', 'database', 'secret_bearing', 'binary_or_cache', 'unknown'];
 const autoApplyKinds = new Set(['merge_text', 'copy_file']);
 const reviewPayloadClasses = new Set(['memory_knowledge', 'mcp_config']);
@@ -322,6 +336,7 @@ export function App() {
   const [sessionNativeFileJournal, setSessionNativeFileJournal] = useState<SessionNativeFileImportJournal | null>(null);
   const [sessionReadinessReport, setSessionReadinessReport] = useState<SessionNativeImportReadinessReport | null>(null);
   const [nativeStoreReport, setNativeStoreReport] = useState<NativeSessionStoreDiscoveryReport | null>(null);
+  const [nativeRemapPreview, setNativeRemapPreview] = useState<NativeSessionProjectRemapPreviewReport | null>(null);
   const [journalHistory, setJournalHistory] = useState<StoredRecord[]>([]);
   const [sessionNativeFileJournalHistory, setSessionNativeFileJournalHistory] = useState<StoredRecord[]>([]);
   const [bundleManifest, setBundleManifest] = useState<SyncBundleManifest | null>(null);
@@ -359,6 +374,7 @@ export function App() {
       setSessionNativeFileJournal(null);
       setSessionReadinessReport(null);
       setNativeStoreReport(null);
+      setNativeRemapPreview(null);
       setBundleManifest(null);
       setStoreMessage(null);
       setSelectedLocalSessionIds([]);
@@ -427,6 +443,7 @@ export function App() {
       setSessionStageJournal(null);
       setSessionNativeFileJournal(null);
       setSessionReadinessReport(null);
+      setNativeRemapPreview(null);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -638,6 +655,26 @@ export function App() {
         maxSchemaTables: 20
       });
       setNativeStoreReport(report);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function previewNativeSessionProjectRemap() {
+    if (!snapshot) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const report = await invoke<NativeSessionProjectRemapPreviewReport>('preview_native_session_project_remap_command', {
+        snapshot,
+        targetHome: targetHomePath || undefined,
+        targetProject: targetProjectPath || undefined,
+        sourceProject: remoteSnapshot?.inputs.project,
+        maxSchemaTables: 20
+      });
+      setNativeRemapPreview(report);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -874,6 +911,7 @@ export function App() {
               <button className="secondary" onClick={refreshJournalHistory} disabled={busy}>Refresh apply journals</button>
               <button className="secondary" onClick={refreshSessionNativeFileJournalHistory} disabled={busy}>Refresh native import journals</button>
               <button className="secondary" onClick={discoverNativeSessionStores} disabled={!snapshot || busy}>Discover native stores</button>
+              <button className="secondary" onClick={previewNativeSessionProjectRemap} disabled={!snapshot || busy}>Preview DB remap columns</button>
               <label>
                 Session staging directory
                 <input value={sessionStageDir} onChange={(event) => setSessionStageDir(event.target.value)} placeholder="agent-sync-session-staging" />
@@ -1119,6 +1157,30 @@ export function App() {
               </ul>
             ) : (
               <p className="empty">No Codex/Claude DB/index candidates were found in the current scan. Increase scan depth/entries if expected stores are missing.</p>
+            )}
+          </section>
+        )}
+
+        {nativeRemapPreview && (
+          <section className="panel">
+            <div className="panelTitle">
+              <h2>Native DB/index project-remap preview</h2>
+              <span>{nativeRemapPreview.candidates.length} schema candidates · no writes</span>
+            </div>
+            {nativeRemapPreview.warnings.length > 0 && (
+              <div className="notice">{nativeRemapPreview.warnings.join(' / ')}</div>
+            )}
+            {nativeRemapPreview.candidates.length ? (
+              <ul className="operationList">
+                {nativeRemapPreview.candidates.slice(0, 80).map((candidate) => (
+                  <li key={`${candidate.agent_id}:${candidate.portable_path}:${candidate.table}:${candidate.column}`}>
+                    {candidate.agent_name} · {candidate.portable_path} · {candidate.table}.{candidate.column} · confidence {candidate.confidence}% · {candidate.write_supported ? 'write supported' : 'preview only'}
+                    <small>{candidate.reason}</small>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="empty">No likely project path columns found in discovered SQLite stores.</p>
             )}
           </section>
         )}

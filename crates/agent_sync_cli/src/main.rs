@@ -1,7 +1,8 @@
 use agent_sync_apply::{
-    NativeSessionStoreDiscoveryOptions, OperationJournal, SessionNativeFileImportJournal,
-    SessionNativeFileImportOptions, SessionNativeImportReadinessOptions, create_journal,
-    discover_native_session_stores, import_session_payloads_to_native_files, preflight,
+    NativeSessionProjectRemapPreviewOptions, NativeSessionStoreDiscoveryOptions, OperationJournal,
+    SessionNativeFileImportJournal, SessionNativeFileImportOptions,
+    SessionNativeImportReadinessOptions, create_journal, discover_native_session_stores,
+    import_session_payloads_to_native_files, preflight, preview_native_session_project_remap,
     rollback_journal, rollback_session_native_file_import_journal, session_native_import_readiness,
 };
 use agent_sync_bundle::{
@@ -107,6 +108,22 @@ fn main() -> anyhow::Result<()> {
             );
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        "preview-native-remap" => {
+            let options = default_scan_options(&args);
+            let snapshot = scan_device(options.clone())?;
+            let report = preview_native_session_project_remap(
+                &snapshot,
+                &NativeSessionProjectRemapPreviewOptions {
+                    target_home: options.home,
+                    target_project: options.project,
+                    source_project: value_after(&args, "--source-project"),
+                    max_schema_tables: value_after(&args, "--max-schema-tables")
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(20),
+                },
+            );
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         "import-native-sessions" => {
             let input =
                 value_after(&args, "--input").unwrap_or_else(|| "agent-sync.asbundle".to_string());
@@ -165,7 +182,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|import-native-sessions|rollback-journal|rollback-native-session-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
+                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
             );
             std::process::exit(2);
         }
