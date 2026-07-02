@@ -213,6 +213,7 @@ fn import_session_payloads_to_native_files_command(
     target_project: Option<String>,
     backup_dir: String,
     rewrite_project_identity: Option<bool>,
+    require_agents_stopped: Option<bool>,
 ) -> Result<SessionNativeFileImportJournal, String> {
     let target_home = target_home
         .map(PathBuf::from)
@@ -226,6 +227,7 @@ fn import_session_payloads_to_native_files_command(
             target_project,
             backup_dir: PathBuf::from(backup_dir),
             rewrite_project_identity: rewrite_project_identity.unwrap_or(true),
+            require_agents_stopped: require_agents_stopped.unwrap_or(true),
         },
     )
     .map_err(|error| error.to_string())

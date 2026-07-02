@@ -1,12 +1,13 @@
 use agent_sync_bundle::SyncBundle;
 use agent_sync_core::SafetyClass;
+use agent_sync_platform::{RunningAgentProcess, detect_running_agent_processes};
 use agent_sync_storage::AgentSyncStore;
 use agent_sync_transform::{ApplyOperationKind, TransformPlan};
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -164,6 +165,7 @@ pub struct SessionNativeFileImportOptions {
     pub target_project: Option<String>,
     pub backup_dir: PathBuf,
     pub rewrite_project_identity: bool,
+    pub require_agents_stopped: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -175,6 +177,8 @@ pub struct SessionNativeFileImportJournal {
     pub selected: usize,
     pub imported: usize,
     pub skipped: usize,
+    #[serde(default)]
+    pub blockers: Vec<String>,
     pub records: Vec<SessionNativeFileImportRecord>,
     pub status: JournalStatus,
 }
@@ -374,7 +378,39 @@ pub fn import_session_payloads_to_native_files(
     bundle: &SyncBundle,
     options: &SessionNativeFileImportOptions,
 ) -> std::io::Result<SessionNativeFileImportJournal> {
+    let running_processes = if options.require_agents_stopped {
+        match detect_running_agent_processes(&selected_agent_ids_with_payloads(bundle, options)) {
+            Ok(processes) => processes,
+            Err(error) => {
+                return Ok(blocked_session_native_file_import_journal(
+                    bundle,
+                    options,
+                    vec![format!(
+                        "could not verify Codex/Claude stopped state: {error}; retry after stopping agents or use the explicit skip option"
+                    )],
+                ));
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    import_session_payloads_to_native_files_with_processes(bundle, options, &running_processes)
+}
+
+pub fn import_session_payloads_to_native_files_with_processes(
+    bundle: &SyncBundle,
+    options: &SessionNativeFileImportOptions,
+    running_processes: &[RunningAgentProcess],
+) -> std::io::Result<SessionNativeFileImportJournal> {
     fs::create_dir_all(&options.backup_dir)?;
+    let blockers = running_agent_blockers(bundle, options, running_processes);
+    if !blockers.is_empty() && options.require_agents_stopped {
+        return Ok(blocked_session_native_file_import_journal(
+            bundle, options, blockers,
+        ));
+    }
+
     let mut records = Vec::new();
     let selected = options.selected_session_ids.len();
 
@@ -529,6 +565,7 @@ pub fn import_session_payloads_to_native_files(
         selected,
         imported,
         skipped: selected.saturating_sub(imported),
+        blockers: Vec::new(),
         records,
         status: if failed {
             JournalStatus::Failed
@@ -536,6 +573,119 @@ pub fn import_session_payloads_to_native_files(
             JournalStatus::Completed
         },
     })
+}
+
+fn selected_agent_ids_with_payloads(
+    bundle: &SyncBundle,
+    options: &SessionNativeFileImportOptions,
+) -> Vec<String> {
+    let mut agent_ids = BTreeSet::new();
+    for archive in &bundle.session_archives {
+        if archive.payloads.is_empty() {
+            continue;
+        }
+        if options
+            .selected_session_ids
+            .iter()
+            .any(|id| id == &archive.session.id)
+        {
+            agent_ids.insert(archive.agent_id.clone());
+        }
+    }
+    agent_ids.into_iter().collect()
+}
+
+fn running_agent_blockers(
+    bundle: &SyncBundle,
+    options: &SessionNativeFileImportOptions,
+    running_processes: &[RunningAgentProcess],
+) -> Vec<String> {
+    let selected_agents = selected_agent_ids_with_payloads(bundle, options)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut blockers = Vec::new();
+    for process in running_processes {
+        if selected_agents.contains(&process.agent_id) {
+            blockers.push(format!(
+                "{} appears to be running (pid {}, executable {}); stop it before native session import or use the explicit skip option",
+                process.agent_id, process.pid, process.executable
+            ));
+        }
+    }
+    blockers.sort();
+    blockers.dedup();
+    blockers
+}
+
+fn blocked_session_native_file_import_journal(
+    bundle: &SyncBundle,
+    options: &SessionNativeFileImportOptions,
+    blockers: Vec<String>,
+) -> SessionNativeFileImportJournal {
+    let mut records = Vec::new();
+    for archive in &bundle.session_archives {
+        if !options
+            .selected_session_ids
+            .iter()
+            .any(|id| id == &archive.session.id)
+            || archive.payloads.is_empty()
+        {
+            continue;
+        }
+
+        let written_payloads = archive
+            .payloads
+            .iter()
+            .map(|payload| {
+                let target_path = native_session_target_path(
+                    archive.agent_id.as_str(),
+                    payload.portable_path.as_str(),
+                    &options.target_home,
+                )
+                .and_then(|result| result.ok())
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+                NativeFilePayloadRecord {
+                    portable_path: payload.portable_path.clone(),
+                    target_path,
+                    backup_path: None,
+                    source_sha256: payload.sha256.clone(),
+                    written_sha256: None,
+                    project_identity_rewritten: false,
+                    status: JournalOperationStatus::Blocked,
+                    message: Some(blockers.join(" / ")),
+                }
+            })
+            .collect();
+
+        records.push(SessionNativeFileImportRecord {
+            agent_id: archive.agent_id.clone(),
+            agent_name: archive.agent_name.clone(),
+            session_id: archive.session.id.clone(),
+            title: archive.session.title.clone(),
+            source_project: archive
+                .source_project
+                .as_ref()
+                .map(|project| project.canonical_path.clone()),
+            target_project: options.target_project.clone(),
+            written_payloads,
+            note: "blocked before writing because native session import requires target agents to be stopped"
+                .to_string(),
+        });
+    }
+
+    SessionNativeFileImportJournal {
+        id: Uuid::new_v4(),
+        created_at: Utc::now(),
+        bundle_id: bundle.manifest.id,
+        source_snapshot: bundle.source_snapshot.id,
+        selected: options.selected_session_ids.len(),
+        imported: 0,
+        skipped: options.selected_session_ids.len(),
+        blockers,
+        records,
+        status: JournalStatus::Failed,
+    }
 }
 
 fn native_session_target_path(
@@ -1573,6 +1723,7 @@ mod tests {
                 target_project: Some(target_project.into()),
                 backup_dir: backup.clone(),
                 rewrite_project_identity: true,
+                require_agents_stopped: false,
             },
         )
         .unwrap();
@@ -1669,6 +1820,7 @@ mod tests {
                 target_project: None,
                 backup_dir: backup,
                 rewrite_project_identity: true,
+                require_agents_stopped: false,
             },
         )
         .unwrap();
@@ -1681,5 +1833,163 @@ mod tests {
         );
         assert!(!root.join("target-home").join("project").exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn blocks_native_session_import_when_agent_process_is_running() {
+        let root =
+            std::env::temp_dir().join(format!("agent-sync-native-running-{}", Uuid::new_v4()));
+        let target_home = root.join("target-home");
+        let backup = root.join("backup");
+        let target_file = target_home
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("07")
+            .join("02")
+            .join("rollout.jsonl");
+        fs::create_dir_all(target_file.parent().unwrap()).unwrap();
+        fs::write(&target_file, "old native session").unwrap();
+
+        let bundle = codex_session_payload_bundle(b"new native session".to_vec());
+        let journal = import_session_payloads_to_native_files_with_processes(
+            &bundle,
+            &SessionNativeFileImportOptions {
+                selected_session_ids: vec!["codex:session-1".into()],
+                target_home: target_home.clone(),
+                target_project: None,
+                backup_dir: backup,
+                rewrite_project_identity: true,
+                require_agents_stopped: true,
+            },
+            &[RunningAgentProcess {
+                agent_id: "codex".into(),
+                pid: 1234,
+                executable: "codex".into(),
+                command: "codex".into(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(journal.status, JournalStatus::Failed);
+        assert_eq!(journal.imported, 0);
+        assert_eq!(journal.skipped, 1);
+        assert_eq!(journal.blockers.len(), 1);
+        assert_eq!(
+            journal.records[0].written_payloads[0].status,
+            JournalOperationStatus::Blocked
+        );
+        assert_eq!(
+            fs::read_to_string(target_file).unwrap(),
+            "old native session"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn allows_native_session_import_when_agent_process_check_is_disabled() {
+        let root =
+            std::env::temp_dir().join(format!("agent-sync-native-skip-check-{}", Uuid::new_v4()));
+        let target_home = root.join("target-home");
+        let backup = root.join("backup");
+        let target_file = target_home
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("07")
+            .join("02")
+            .join("rollout.jsonl");
+
+        let bundle = codex_session_payload_bundle(b"new native session".to_vec());
+        let journal = import_session_payloads_to_native_files_with_processes(
+            &bundle,
+            &SessionNativeFileImportOptions {
+                selected_session_ids: vec!["codex:session-1".into()],
+                target_home: target_home.clone(),
+                target_project: None,
+                backup_dir: backup,
+                rewrite_project_identity: true,
+                require_agents_stopped: false,
+            },
+            &[RunningAgentProcess {
+                agent_id: "codex".into(),
+                pid: 1234,
+                executable: "codex".into(),
+                command: "codex".into(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(journal.status, JournalStatus::Completed);
+        assert_eq!(journal.imported, 1);
+        assert_eq!(journal.blockers.len(), 0);
+        assert_eq!(
+            fs::read_to_string(target_file).unwrap(),
+            "new native session"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn codex_session_payload_bundle(bytes: Vec<u8>) -> SyncBundle {
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let session = agent_sync_core::SessionRecord {
+            id: "codex:session-1".into(),
+            agent_id: "codex".into(),
+            title: Some("Session 1".into()),
+            created_at: None,
+            updated_at: None,
+            source_project: None,
+            storage_refs: vec![],
+            visibility: agent_sync_core::SessionVisibility::Unknown,
+            content_policy: agent_sync_core::ContentPolicy::ExplicitRawPayloadRequired,
+            import_capabilities: agent_sync_core::SessionImportCapabilities::default(),
+        };
+        SyncBundle {
+            manifest: agent_sync_bundle::SyncBundleManifest {
+                schema_version: "0.2".into(),
+                id: Uuid::new_v4(),
+                created_at: Utc::now(),
+                source_snapshot: Uuid::new_v4(),
+                selections: vec![],
+                redactions: vec![],
+                encryption: agent_sync_bundle::BundleEncryptionInfo {
+                    required_for_sensitive_payloads: true,
+                    method: "none".into(),
+                },
+            },
+            source_snapshot: agent_sync_core::DeviceSnapshot {
+                schema_version: "0.2".into(),
+                id: Uuid::new_v4(),
+                generated_at: Utc::now(),
+                platform: agent_sync_core::PlatformInfo {
+                    os: "test".into(),
+                    arch: "test".into(),
+                },
+                inputs: agent_sync_core::SnapshotInputs {
+                    home: "~".into(),
+                    project: "/tmp/project".into(),
+                    max_depth: 1,
+                    max_entries: 10,
+                },
+                summary: agent_sync_core::SnapshotSummary::default(),
+                projects: vec![],
+                agents: vec![],
+            },
+            payloads: vec![],
+            session_archives: vec![agent_sync_bundle::SessionArchiveEntry {
+                agent_id: "codex".into(),
+                agent_name: "Codex".into(),
+                session,
+                source_project: None,
+                payload_included: true,
+                payloads: vec![PayloadEntry {
+                    agent_id: "codex".into(),
+                    portable_path: "~/.codex/sessions/2026/07/02/rollout.jsonl".into(),
+                    sha256: sha,
+                    base64_content: base64::engine::general_purpose::STANDARD.encode(bytes),
+                }],
+                import_note: "raw payload included".into(),
+            }],
+        }
     }
 }

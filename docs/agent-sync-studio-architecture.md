@@ -52,7 +52,7 @@ Automatically applicable today:
 - explicitly selected `memory_knowledge` and `mcp_config` text payloads from a verified bundle, only after UI/CLI acknowledgement of the review gate, with backup and checksum verification.
 - rollback of apply journals by restoring backup files or removing files created by the apply.
 - metadata-only session archive records into Agent Sync Studio SQLite storage.
-- explicitly selected raw session payloads into isolated staging, or into native Codex/Claude file locations under a chosen target home. Native file import is allowlisted to `~/.codex/**` and `~/.claude/**`, backs up existing files, optionally rewrites source project paths to the target project path, and verifies written checksums.
+- explicitly selected raw session payloads into isolated staging, or into native Codex/Claude file locations under a chosen target home. Native file import is allowlisted to `~/.codex/**` and `~/.claude/**`, defaults to a Codex/Claude stopped-agent process preflight, backs up existing files, optionally rewrites source project paths to the target project path, and verifies written checksums. The user can explicitly bypass the stopped-agent check for a manual override; the journal records blockers when the preflight fails.
 
 ## Current implementation status
 
@@ -63,8 +63,8 @@ Implemented:
 - Real `.asbundle` JSON container with source snapshot, payload checksums, safe config payloads, explicitly selected memory/MCP review payloads, metadata-only session archive entries, explicitly selected raw session payloads, and secret redactions.
 - Local SQLite store for snapshots, apply journals, and session archive records as JSON records.
 - Safe config plus acknowledged memory/MCP review apply path with visual operation selection, backup, operation journal, checksum verification, automatic journal persistence, history loading, and journal rollback.
-- Session Library flow: choose local sessions for raw payload export; choose remote Codex/Claude session archives, bind them to the target home/project path, import metadata-only records into local Agent Sync Studio SQLite storage, stage selected raw payloads into an isolated native-import directory, or write selected payloads to native Codex/Claude session-file locations with project-path rewrite evidence.
-- Rust CLI: `scan`, `bundle-manifest`, `export-bundle`, `verify-bundle`, `import-native-sessions`, `self-plan`.
+- Session Library flow: choose local sessions for raw payload export; choose remote Codex/Claude session archives, bind them to the target home/project path, import metadata-only records into local Agent Sync Studio SQLite storage, stage selected raw payloads into an isolated native-import directory, or write selected payloads to native Codex/Claude session-file locations with project-path rewrite evidence and a stopped-agent preflight.
+- Rust CLI: `scan`, `bundle-manifest`, `export-bundle`, `verify-bundle`, `import-native-sessions`, `rollback-journal`, `self-plan`; `import-native-sessions` defaults to the stopped-agent check and exposes `--skip-agent-stopped-check` for explicit override.
 
 Implemented in the current product loop:
 

@@ -88,6 +88,9 @@ fn main() -> anyhow::Result<()> {
                     rewrite_project_identity: !args
                         .iter()
                         .any(|arg| arg == "--no-rewrite-project-identity"),
+                    require_agents_stopped: !args
+                        .iter()
+                        .any(|arg| arg == "--skip-agent-stopped-check"),
                 },
             )?;
             println!("{}", serde_json::to_string_pretty(&journal)?);
@@ -112,7 +115,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|import-native-sessions|rollback-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity]"
+                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|import-native-sessions|rollback-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check]"
             );
             std::process::exit(2);
         }

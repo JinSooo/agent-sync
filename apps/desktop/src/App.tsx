@@ -194,6 +194,7 @@ type SessionNativeFileImportJournal = {
   selected: number;
   imported: number;
   skipped: number;
+  blockers: string[];
   records: Array<{
     agent_id: string;
     agent_name: string;
@@ -259,6 +260,7 @@ export function App() {
   const [backupDir, setBackupDir] = useState('agent-sync-backups');
   const [archiveStorePath, setArchiveStorePath] = useState('agent-sync-studio.sqlite');
   const [sessionStageDir, setSessionStageDir] = useState('agent-sync-session-staging');
+  const [requireAgentsStopped, setRequireAgentsStopped] = useState(true);
 
   async function scan() {
     setBusy(true);
@@ -462,7 +464,8 @@ export function App() {
         targetHome: targetHomePath || undefined,
         targetProject: targetProjectPath || undefined,
         backupDir: backupDir || 'agent-sync-backups',
-        rewriteProjectIdentity: true
+        rewriteProjectIdentity: true,
+        requireAgentsStopped
       });
       setSessionNativeFileJournal(nextJournal);
     } catch (err) {
@@ -797,6 +800,10 @@ export function App() {
               <button className="secondary" onClick={stageSelectedSessionPayloads} disabled={!importedBundle || selectedSessionIds.length === 0 || busy}>
                 Stage selected native session payloads
               </button>
+              <label className="ackBox">
+                <input type="checkbox" checked={requireAgentsStopped} onChange={(event) => setRequireAgentsStopped(event.target.checked)} />
+                Require Codex/Claude to be stopped before writing native session files. Uncheck only for an explicit manual override.
+              </label>
               <button onClick={importSelectedSessionPayloadsToNativeFiles} disabled={!importedBundle || selectedSessionIds.length === 0 || selectedRemotePayloadCount === 0 || busy}>
                 Import selected payloads to native files
               </button>
@@ -987,6 +994,12 @@ export function App() {
               <span className="chip">selected {sessionNativeFileJournal.selected}</span>
               <span className="chip">skipped {sessionNativeFileJournal.skipped}</span>
             </div>
+            {sessionNativeFileJournal.blockers.length > 0 && (
+              <div className="preflight fail">
+                Native import blocked
+                <small>{sessionNativeFileJournal.blockers.join(' / ')}</small>
+              </div>
+            )}
             <ul className="operationList">
               {sessionNativeFileJournal.records.map((record) => (
                 <li key={record.session_id}>

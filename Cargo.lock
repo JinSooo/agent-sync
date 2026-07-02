@@ -49,6 +49,7 @@ version = "0.2.0"
 dependencies = [
  "agent_sync_bundle",
  "agent_sync_core",
+ "agent_sync_platform",
  "agent_sync_storage",
  "agent_sync_transform",
  "base64 0.22.1",

@@ -32,7 +32,7 @@ The older Node CLI remains available as a legacy reference while the Rust/Tauri 
 - Choose local Codex/Claude sessions whose raw payloads should be included in the next bundle.
 - Choose remote Codex/Claude session archives and import them into the local Agent Sync Studio archive store with target-project mapping.
 - Stage selected raw session payloads into an isolated native-import directory with optional source-project to target-project path rewriting.
-- Import selected raw session payloads into the target home as native Codex/Claude session files, limited to `~/.codex/**` and `~/.claude/**`, with backup, path rewriting, and checksum journal.
+- Import selected raw session payloads into the target home as native Codex/Claude session files, limited to `~/.codex/**` and `~/.claude/**`, with backup, path rewriting, checksum journal, and a default stopped-agent preflight for Codex/Claude.
 - Apply selected safe payloads with backups and checksum verification.
 - Roll back apply journals by restoring backed-up files or removing files that did not exist before the apply.
 - Persist snapshots and apply journals in a local SQLite record store so rollback points survive app restarts.
@@ -49,6 +49,8 @@ cargo run -p agent_sync_cli -- export-bundle --output agent-sync-review.asbundle
 cargo run -p agent_sync_cli -- export-bundle --output agent-sync-sessions.asbundle --max-depth 8 --max-entries 5000 --include-session-payloads --session "codex:~/.codex/sessions/YYYY/MM/DD/session.jsonl"
 cargo run -p agent_sync_cli -- verify-bundle --input agent-sync-local.asbundle
 cargo run -p agent_sync_cli -- import-native-sessions --input agent-sync-sessions.asbundle --target-home "$HOME" --target-project "$PWD" --backup-dir agent-sync-backups --session "codex:~/.codex/sessions/YYYY/MM/DD/session.jsonl"
+# Explicit override when you have manually accepted the risk of importing while the target agent may be running:
+cargo run -p agent_sync_cli -- import-native-sessions --input agent-sync-sessions.asbundle --target-home "$HOME" --target-project "$PWD" --backup-dir agent-sync-backups --session "codex:~/.codex/sessions/YYYY/MM/DD/session.jsonl" --skip-agent-stopped-check
 cargo run -p agent_sync_cli -- rollback-journal --input agent-sync-journal.json
 cargo run -p agent_sync_cli -- self-plan
 
@@ -86,6 +88,6 @@ Automatically applicable today:
 - automatic apply-journal persistence into the local SQLite store, with UI loading of stored rollback points.
 - metadata-only session archive records into Agent Sync Studio SQLite storage.
 - selected raw session payloads into an isolated staging directory with project-path rewrite journal.
-- selected raw session payloads into native Codex/Claude file locations under a chosen target home, with strict `~/.codex/**` / `~/.claude/**` allowlisting, backup, optional project-path rewrite, and checksum verification. This does not rewrite native Codex/Claude databases or secondary indexes.
+- selected raw session payloads into native Codex/Claude file locations under a chosen target home, with strict `~/.codex/**` / `~/.claude/**` allowlisting, default Codex/Claude stopped-agent preflight, backup, optional project-path rewrite, and checksum verification. The UI exposes an explicit manual override and the CLI exposes `--skip-agent-stopped-check`; this does not rewrite native Codex/Claude databases or secondary indexes.
 
 See `.omx/plans/agent-sync-studio-full-architecture-20260701.md` and `docs/agent-sync-studio-architecture.md` for the full implementation architecture.
