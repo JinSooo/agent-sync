@@ -70,6 +70,7 @@ Implemented:
 Implemented in the current product loop:
 
 - Native file picker flow for bundle import/export, target home, target project, staging, and backup directory.
+- Searchable/filterable selection lists for local session payload export, review-required memory/MCP payload export, and imported remote session archive/native-file actions, with filtered-result bulk selection.
 - Project-mapping UI with git-remote exact match, basename fallback, confidence, manual-review warning, and capability-visible DB/index remap limitations.
 
 Still to deepen:

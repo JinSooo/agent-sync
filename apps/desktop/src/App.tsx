@@ -385,6 +385,9 @@ export function App() {
   const [selectedSessionIds, setSelectedSessionIds] = useState<string[]>([]);
   const [selectedLocalSessionIds, setSelectedLocalSessionIds] = useState<string[]>([]);
   const [selectedLocalReviewPayloadKeys, setSelectedLocalReviewPayloadKeys] = useState<string[]>([]);
+  const [localSessionQuery, setLocalSessionQuery] = useState('');
+  const [reviewPayloadQuery, setReviewPayloadQuery] = useState('');
+  const [remoteSessionQuery, setRemoteSessionQuery] = useState('');
   const [selectedNativeRemapKeys, setSelectedNativeRemapKeys] = useState<string[]>([]);
   const [reviewApplyAcknowledged, setReviewApplyAcknowledged] = useState(false);
   const [allowUnencryptedSensitiveExport, setAllowUnencryptedSensitiveExport] = useState(false);
@@ -990,11 +993,17 @@ export function App() {
   const totalSessions = useMemo(() => agents.reduce((count, agent) => count + agent.sessions.length, 0), [agents]);
   const localSessions = useMemo(() => agents.flatMap((agent) => agent.sessions.map((session) => ({ agent, session }))), [agents]);
   const exportableLocalSessions = useMemo(() => localSessions.filter(({ agent }) => agent.capabilities.can_export_sessions), [localSessions]);
+  const filteredLocalSessions = useMemo(() => localSessions.filter((row) => matchesLocalSession(row, localSessionQuery)), [localSessions, localSessionQuery]);
+  const filteredExportableLocalSessions = useMemo(() => filteredLocalSessions.filter(({ agent }) => agent.capabilities.can_export_sessions), [filteredLocalSessions]);
   const localReviewPayloads = useMemo(
     () => agents.flatMap((agent) => agent.findings
       .filter((finding) => reviewPayloadClasses.has(finding.safety_class))
       .map((finding) => ({ agent, finding, key: payloadSelectionKey(agent.id, finding.portable_path) }))),
     [agents]
+  );
+  const filteredLocalReviewPayloads = useMemo(
+    () => localReviewPayloads.filter((item) => matchesReviewPayload(item, reviewPayloadQuery)),
+    [localReviewPayloads, reviewPayloadQuery]
   );
   const sensitiveLocalPayloadSelected = selectedLocalReviewPayloadKeys.length > 0 || selectedLocalSessionIds.length > 0;
   const bundlePassphraseProvided = bundlePassphrase.length > 0;
@@ -1007,6 +1016,10 @@ export function App() {
   const autoApplicableCount = plan?.operations.filter(isAutoApplicable).length ?? 0;
   const reviewApplicableCount = plan?.operations.filter(isReviewPayloadApplicable).length ?? 0;
   const importedSessionArchives = importedBundle?.session_archives ?? [];
+  const filteredImportedSessionArchives = useMemo(
+    () => importedSessionArchives.filter((archive) => matchesImportedSessionArchive(archive, remoteSessionQuery)),
+    [importedSessionArchives, remoteSessionQuery]
+  );
   const selectedRemoteArchives = useMemo(
     () => importedSessionArchives.filter((archive) => selectedSessionIds.includes(archive.session.id)),
     [importedSessionArchives, selectedSessionIds]
@@ -1188,21 +1201,30 @@ export function App() {
         <section className="panel">
           <div className="panelTitle">
             <h2>Local sessions for next bundle</h2>
-            <span>{selectedLocalSessionIds.length}/{localSessions.length} selected for raw payload export</span>
+            <span>{selectedLocalSessionIds.length} selected · {filteredLocalSessions.length}/{localSessions.length} visible</span>
           </div>
           {localSessions.length ? (
             <div className="stack">
+              <label>
+                Search local sessions
+                <input value={localSessionQuery} onChange={(event) => setLocalSessionQuery(event.target.value)} placeholder="title, id, agent, project path, policy" />
+              </label>
               <div className="chips">
-                <button className="secondary smallButton" onClick={() => setSelectedLocalSessionIds(exportableLocalSessions.map(({ session }) => session.id))} disabled={busy}>Select exportable sessions</button>
+                <button className="secondary smallButton" onClick={() => setSelectedLocalSessionIds(filteredExportableLocalSessions.map(({ session }) => session.id))} disabled={busy}>Select visible exportable</button>
+                <button className="secondary smallButton" onClick={() => setSelectedLocalSessionIds(exportableLocalSessions.map(({ session }) => session.id))} disabled={busy}>Select all exportable</button>
                 <button className="secondary smallButton" onClick={() => setSelectedLocalSessionIds([])} disabled={busy}>Clear</button>
               </div>
+              {filteredLocalSessions.length > 240 && (
+                <p className="muted">Showing first 240 filtered sessions. Narrow the search to choose more precisely.</p>
+              )}
               <div className="operationTable compact">
-                {localSessions.slice(0, 120).map(({ agent, session }) => (
+                {filteredLocalSessions.slice(0, 240).map(({ agent, session }) => (
                   <label key={session.id} className="operationItem">
                     <input type="checkbox" checked={selectedLocalSessionIds.includes(session.id)} disabled={!agent.capabilities.can_export_sessions} onChange={() => toggleLocalSession(session.id)} />
                     <span>
                       <strong>{agent.name}</strong> · {session.title ?? session.id}
                       <small>{session.visibility} · {session.content_policy} · {agent.capabilities.can_export_sessions ? 'payload is included only if checked before Export local bundle' : 'adapter cannot export sessions yet'}</small>
+                      <small>{session.id}</small>
                     </span>
                   </label>
                 ))}
@@ -1216,16 +1238,24 @@ export function App() {
         <section className="panel">
           <div className="panelTitle">
             <h2>Memory / MCP payloads for next bundle</h2>
-            <span>{selectedLocalReviewPayloadKeys.length}/{localReviewPayloads.length} selected for explicit review export</span>
+            <span>{selectedLocalReviewPayloadKeys.length} selected · {filteredLocalReviewPayloads.length}/{localReviewPayloads.length} visible</span>
           </div>
           {localReviewPayloads.length ? (
             <div className="stack">
+              <label>
+                Search memory / MCP payloads
+                <input value={reviewPayloadQuery} onChange={(event) => setReviewPayloadQuery(event.target.value)} placeholder="path, agent, safety class, risk, reason" />
+              </label>
               <div className="chips">
+                <button className="secondary smallButton" onClick={() => setSelectedLocalReviewPayloadKeys(filteredLocalReviewPayloads.map((item) => item.key))} disabled={busy}>Select visible payloads</button>
                 <button className="secondary smallButton" onClick={() => setSelectedLocalReviewPayloadKeys(localReviewPayloads.map((item) => item.key))} disabled={busy}>Select all review payloads</button>
                 <button className="secondary smallButton" onClick={() => setSelectedLocalReviewPayloadKeys([])} disabled={busy}>Clear</button>
               </div>
+              {filteredLocalReviewPayloads.length > 240 && (
+                <p className="muted">Showing first 240 filtered payloads. Narrow the search to choose more precisely.</p>
+              )}
               <div className="operationTable compact">
-                {localReviewPayloads.slice(0, 160).map(({ agent, finding, key }) => (
+                {filteredLocalReviewPayloads.slice(0, 240).map(({ agent, finding, key }) => (
                   <label key={key} className="operationItem">
                     <input type="checkbox" checked={selectedLocalReviewPayloadKeys.includes(key)} onChange={() => toggleLocalReviewPayload(key)} />
                     <span>
@@ -1245,12 +1275,33 @@ export function App() {
         <section className="panel">
           <div className="panelTitle">
             <h2>Session Library</h2>
-            <span>{selectedSessionIds.length}/{importedSessionArchives.length} selected · {selectedRemotePayloadCount} payloads</span>
+            <span>{selectedSessionIds.length} selected · {filteredImportedSessionArchives.length}/{importedSessionArchives.length} visible · {selectedRemotePayloadCount} payloads</span>
           </div>
           {importedSessionArchives.length ? (
             <div className="stack">
+              <label>
+                Search imported sessions
+                <input value={remoteSessionQuery} onChange={(event) => setRemoteSessionQuery(event.target.value)} placeholder="title, id, agent, source project, policy" />
+              </label>
+              <div className="chips">
+                <button className="secondary smallButton" onClick={() => {
+                  setSelectedSessionIds(filteredImportedSessionArchives.map((archive) => archive.session.id));
+                  setSessionReadinessReport(null);
+                }} disabled={busy}>Select visible sessions</button>
+                <button className="secondary smallButton" onClick={() => {
+                  setSelectedSessionIds(importedSessionArchives.map((archive) => archive.session.id));
+                  setSessionReadinessReport(null);
+                }} disabled={busy}>Select all imported</button>
+                <button className="secondary smallButton" onClick={() => {
+                  setSelectedSessionIds([]);
+                  setSessionReadinessReport(null);
+                }} disabled={busy}>Clear</button>
+              </div>
+              {filteredImportedSessionArchives.length > 240 && (
+                <p className="muted">Showing first 240 filtered session archives. Narrow the search to choose more precisely.</p>
+              )}
               <div className="operationTable">
-                {importedSessionArchives.slice(0, 100).map((archive) => (
+                {filteredImportedSessionArchives.slice(0, 240).map((archive) => (
                   <label key={archive.session.id} className="operationItem">
                     <input type="checkbox" checked={selectedSessionIds.includes(archive.session.id)} onChange={() => toggleSession(archive.session.id)} />
                     <span>
@@ -1258,6 +1309,7 @@ export function App() {
                       <small>
                         {archive.session.visibility} · {archive.session.content_policy} · source project {archive.source_project?.canonical_path ?? 'unknown'} · {archive.payload_included ? `${archive.payloads.length} payload(s) included` : 'metadata-only'}
                       </small>
+                      <small>{archive.session.id}</small>
                       <small>{archive.import_note}</small>
                     </span>
                   </label>
@@ -1700,6 +1752,61 @@ function bundleRecipientInputsToArray(value: string): string[] {
     .split(/[\n,;]/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function matchesLocalSession(row: { agent: AgentSnapshot; session: SessionRecord }, query: string): boolean {
+  return textMatchesQuery(query, [
+    row.agent.name,
+    row.agent.id,
+    row.session.id,
+    row.session.title,
+    row.session.source_project,
+    row.session.visibility,
+    row.session.content_policy
+  ]);
+}
+
+function matchesReviewPayload(
+  row: { agent: AgentSnapshot; finding: AgentSnapshot['findings'][number]; key: string },
+  query: string
+): boolean {
+  return textMatchesQuery(query, [
+    row.agent.name,
+    row.agent.id,
+    row.finding.portable_path,
+    row.finding.safety_class,
+    row.finding.risk,
+    row.finding.reason,
+    row.key
+  ]);
+}
+
+function matchesImportedSessionArchive(archive: SessionArchiveEntry, query: string): boolean {
+  return textMatchesQuery(query, [
+    archive.agent_name,
+    archive.agent_id,
+    archive.session.id,
+    archive.session.title,
+    archive.session.source_project,
+    archive.session.visibility,
+    archive.session.content_policy,
+    archive.source_project?.canonical_path,
+    archive.source_project?.physical_path,
+    archive.source_project?.git_remote,
+    archive.source_project?.package_name,
+    archive.import_note
+  ]);
+}
+
+function textMatchesQuery(query: string, values: Array<string | undefined>): boolean {
+  const tokens = query
+    .toLowerCase()
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+  if (tokens.length === 0) return true;
+  const haystack = values.filter(Boolean).join(' ').toLowerCase();
+  return tokens.every((token) => haystack.includes(token));
 }
 
 function payloadSelectionKey(agentId: string, portablePath: string): string {

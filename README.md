@@ -29,8 +29,8 @@ The older Node CLI remains available as a legacy reference while the Rust/Tauri 
 - Show project mapping confidence by normalized git remote, directory basename, or manual fallback, while clearly warning when the adapter does not support DB/index-level project remap.
 - Select auto-safe operations visually.
 - Choose memory/rules/prompts and MCP config payloads for explicit review export, then apply selected review payloads only after an acknowledgement gate.
-- Choose local Codex/Claude sessions whose raw payloads should be included in the next bundle, gated by adapter export capability.
-- Choose remote Codex/Claude session archives and import them into the local Agent Sync Studio archive store with target-project mapping; native-file actions are gated by adapter import capability.
+- Search/filter local Codex/Claude sessions and memory/MCP payloads, then choose exactly which raw session payloads or review-required payloads should be included in the next bundle; raw session selection remains gated by adapter export capability.
+- Search/filter remote Codex/Claude session archives and import selected archives into the local Agent Sync Studio archive store with target-project mapping; native-file actions are gated by adapter import capability.
 - Stage selected raw session payloads into an isolated native-import directory with optional source-project to target-project path rewriting.
 - Check native session import readiness before writing, including raw-payload presence, adapter capability, stopped-agent preflight posture, rollback limits, and DB/index remap gaps.
 - Discover native Codex/Claude DB/index store candidates in read-only mode, including SQLite table/column schema summaries without row contents.
