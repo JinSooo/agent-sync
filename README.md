@@ -48,6 +48,7 @@ The older Node CLI remains available as a legacy reference while the Rust/Tauri 
 - Apply selected safe payloads with backups and checksum verification.
 - Roll back apply journals and native session import journals by restoring backed-up files or removing files that did not exist before the apply/import.
 - Persist snapshots, apply journals, and native session import journals in a local SQLite record store so rollback points survive app restarts.
+- Gate pushes and pull requests with a GitHub Actions matrix for macOS, Windows, and Linux covering Rust tests, legacy Node checks, desktop web build, and Tauri no-bundle build.
 
 ## Commands
 

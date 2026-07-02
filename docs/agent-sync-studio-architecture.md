@@ -75,6 +75,7 @@ Implemented in the current product loop:
 - Searchable/filterable selection lists for local session payload export, review-required memory/MCP payload export, and imported remote session archive/native-file actions, with filtered-result bulk selection and per-session target-project override fields.
 - Project-mapping UI with git-remote exact match, basename fallback, confidence, manual-review warning, and capability-visible DB/index remap limitations.
 - Native compatibility evidence UI that explains which parts are supported today, which SQLite remap candidates are exact-match/write-gated, and which opaque DB/index surfaces remain fixture-gated rather than claimed.
+- GitHub Actions CI matrix for macOS, Windows, and Linux running Rust tests, legacy Node checks, desktop web build, and Tauri no-bundle build.
 
 Still to deepen:
 - Codex native session import/remap into opaque Codex-owned secondary indexes/databases beyond explicit SQLite exact-match candidate updates; current SQLite remap has preview, read-only dry-run counts, backup/transaction/rollback, but adapter-specific index semantics still need fixtures before broad capability claims.
