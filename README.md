@@ -29,6 +29,7 @@ The older Node CLI remains available as a legacy reference while the Rust/Tauri 
 - Exchange public recipient inventory files between devices so a new machine can import trusted public recipients without copying private keys. Inventory imports deduplicate by age recipient and skip revoked profiles by default.
 - Export and restore an OS keychain bundle identity through a passphrase-encrypted backup file for lost-device or machine-rebuild recovery. The backup contains the private age identity, so the file and passphrase must be stored separately.
 - Import and verify a remote `.asbundle` in the desktop UI.
+- Save local scans into the Agent Sync Studio SQLite store, refresh snapshot history, and reload a prior scan after restarting the app.
 - Create a remote-to-local transform plan.
 - Show project mapping confidence by normalized git remote, directory basename, or manual fallback, while clearly warning when the adapter does not support DB/index-level project remap.
 - Select auto-safe operations visually.
@@ -122,6 +123,7 @@ Automatically applicable today:
 - safe text config payloads from a verified bundle, only through selected operations, with backup and checksum verification.
 - explicitly selected `memory_knowledge` and `mcp_config` text payloads from a verified bundle, only after the review-acknowledgement gate, with backup and checksum verification.
 - apply journal rollback for backup-backed changes and files created by the apply.
+- local scan snapshot persistence into the local SQLite store, with UI history loading so a saved scan can be restored after restart.
 - automatic apply-journal, native session import-journal, and native DB remap-journal persistence into the local SQLite store, with UI loading of stored rollback points.
 - metadata-only session archive records into Agent Sync Studio SQLite storage, including per-session target-project metadata when the user overrides the global target.
 - selected raw session payloads into an isolated staging directory with project-path rewrite journal; per-session target overrides are recorded in the stage journal.

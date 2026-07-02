@@ -480,6 +480,7 @@ export function App() {
   const [nativeRemapDryRun, setNativeRemapDryRun] = useState<NativeSessionProjectRemapDryRunReport | null>(null);
   const [nativeRemapDryRunSelectionKey, setNativeRemapDryRunSelectionKey] = useState('');
   const [nativeRemapJournal, setNativeRemapJournal] = useState<NativeSessionProjectRemapJournal | null>(null);
+  const [snapshotHistory, setSnapshotHistory] = useState<StoredRecord[]>([]);
   const [journalHistory, setJournalHistory] = useState<StoredRecord[]>([]);
   const [sessionNativeFileJournalHistory, setSessionNativeFileJournalHistory] = useState<StoredRecord[]>([]);
   const [nativeRemapJournalHistory, setNativeRemapJournalHistory] = useState<StoredRecord[]>([]);
@@ -833,10 +834,11 @@ export function App() {
     setError(null);
     try {
       const id = await invoke<string>('save_snapshot_to_store', {
-        dbPath: 'agent-sync-studio.sqlite',
+        dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
         snapshot
       });
       setStoreMessage(`snapshot saved: ${id}`);
+      await refreshSnapshotHistory();
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1000,6 +1002,18 @@ export function App() {
     setJournalHistory(rows);
   }
 
+  async function refreshSnapshotHistory() {
+    try {
+      const rows = await invoke<StoredRecord[]>('list_store_records', {
+        dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
+        kind: 'snapshot'
+      });
+      setSnapshotHistory(rows);
+    } catch (err) {
+      setError(`Failed to load snapshot history: ${String(err)}`);
+    }
+  }
+
   async function refreshSessionNativeFileJournalHistory() {
     const rows = await invoke<StoredRecord[]>('list_store_records', {
       dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
@@ -1046,6 +1060,38 @@ export function App() {
       setStoreMessage(`native DB remap journal loaded: ${record.id}`);
     } catch (err) {
       setError(`Failed to parse stored native DB remap journal ${record.id}: ${String(err)}`);
+    }
+  }
+
+  async function loadSnapshotFromHistory(record: StoredRecord) {
+    setError(null);
+    try {
+      const parsed = JSON.parse(record.json) as DeviceSnapshot;
+      if (!parsed.id || !Array.isArray(parsed.agents)) {
+        throw new Error('stored record is not a device snapshot');
+      }
+      setSnapshot(parsed);
+      setTargetHomePath(parsed.inputs.home);
+      setTargetProjectPath(parsed.inputs.project);
+      setPlan(null);
+      setPreflight(null);
+      setJournal(null);
+      setSessionArchiveJournal(null);
+      setSessionStageJournal(null);
+      setSessionNativeFileJournal(null);
+      setSessionReadinessReport(null);
+      setNativeStoreReport(null);
+      setNativeCompatibilityReport(null);
+      setNativeRemapPreview(null);
+      setNativeRemapDryRun(null);
+      setNativeRemapDryRunSelectionKey('');
+      setNativeRemapJournal(null);
+      setSelectedNativeRemapKeys([]);
+      setSelectedLocalSessionIds([]);
+      setSelectedLocalReviewPayloadKeys([]);
+      setStoreMessage(`snapshot loaded: ${record.id}`);
+    } catch (err) {
+      setError(`Failed to parse stored snapshot ${record.id}: ${String(err)}`);
     }
   }
 
@@ -1624,6 +1670,7 @@ export function App() {
                 Archive store
                 <input value={archiveStorePath} onChange={(event) => setArchiveStorePath(event.target.value)} placeholder="agent-sync-studio.sqlite" />
               </label>
+              <button className="secondary" onClick={refreshSnapshotHistory} disabled={busy}>Refresh snapshots</button>
               <button className="secondary" onClick={refreshJournalHistory} disabled={busy}>Refresh apply journals</button>
               <button className="secondary" onClick={refreshSessionNativeFileJournalHistory} disabled={busy}>Refresh native import journals</button>
               <button className="secondary" onClick={refreshNativeRemapJournalHistory} disabled={busy}>Refresh DB remap journals</button>
@@ -2237,6 +2284,28 @@ export function App() {
         )}
         <section className="panel">
           <div className="panelTitle">
+            <h2>Snapshot history</h2>
+            <span>{snapshotHistory.length} stored in {archiveStorePath || 'agent-sync-studio.sqlite'}</span>
+          </div>
+          {snapshotHistory.length ? (
+            <ul className="operationList">
+              {snapshotHistory.slice(0, 20).map((record) => {
+                const summary = storedSnapshotSummary(record);
+                return (
+                  <li key={record.id}>
+                    <button className="secondary smallButton" onClick={() => loadSnapshotFromHistory(record)} disabled={busy}>Load</button>{' '}
+                    {record.id} · {summary.platform} · agents {summary.detectedAgents}/{summary.agents} · findings {summary.findings} · updated {record.updated_at}
+                    <small>{summary.project}</small>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="empty">Snapshots are saved on demand. Refresh to restore a previous scan after restarting the app.</p>
+          )}
+        </section>
+        <section className="panel">
+          <div className="panelTitle">
             <h2>Apply journal history</h2>
             <span>{journalHistory.length} stored in {archiveStorePath || 'agent-sync-studio.sqlite'}</span>
           </div>
@@ -2537,6 +2606,27 @@ function remapCandidateToSelection(candidate: NativeSessionProjectRemapCandidate
     table: candidate.table,
     column: candidate.column
   };
+}
+
+function storedSnapshotSummary(record: StoredRecord): { platform: string; agents: number; detectedAgents: number; findings: number; project: string } {
+  try {
+    const snapshot = JSON.parse(record.json) as DeviceSnapshot;
+    return {
+      platform: `${snapshot.platform.os}/${snapshot.platform.arch}`,
+      agents: snapshot.agents.length,
+      detectedAgents: snapshot.agents.filter((agent) => agent.detected).length,
+      findings: snapshot.summary.findings,
+      project: snapshot.inputs.project
+    };
+  } catch {
+    return {
+      platform: 'invalid_json',
+      agents: 0,
+      detectedAgents: 0,
+      findings: 0,
+      project: 'Unable to parse stored snapshot'
+    };
+  }
 }
 
 function storedJournalSummary(record: StoredRecord): { status: string; operations: number } {
