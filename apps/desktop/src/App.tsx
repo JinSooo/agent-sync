@@ -261,6 +261,20 @@ type SessionNativeImportReadinessReport = {
   }>;
 };
 
+type NativeSessionStoreDiscoveryReport = {
+  warnings: string[];
+  stores: Array<{
+    agent_id: string;
+    agent_name: string;
+    portable_path: string;
+    store_kind: string;
+    size?: number;
+    schema_status: string;
+    tables: Array<{ name: string; columns: string[] }>;
+    note: string;
+  }>;
+};
+
 const safetyOrder = ['safe_config', 'memory_knowledge', 'mcp_config', 'raw_session', 'executable', 'database', 'secret_bearing', 'binary_or_cache', 'unknown'];
 const autoApplyKinds = new Set(['merge_text', 'copy_file']);
 const reviewPayloadClasses = new Set(['memory_knowledge', 'mcp_config']);
@@ -307,6 +321,7 @@ export function App() {
   const [sessionStageJournal, setSessionStageJournal] = useState<SessionNativeImportStageJournal | null>(null);
   const [sessionNativeFileJournal, setSessionNativeFileJournal] = useState<SessionNativeFileImportJournal | null>(null);
   const [sessionReadinessReport, setSessionReadinessReport] = useState<SessionNativeImportReadinessReport | null>(null);
+  const [nativeStoreReport, setNativeStoreReport] = useState<NativeSessionStoreDiscoveryReport | null>(null);
   const [journalHistory, setJournalHistory] = useState<StoredRecord[]>([]);
   const [sessionNativeFileJournalHistory, setSessionNativeFileJournalHistory] = useState<StoredRecord[]>([]);
   const [bundleManifest, setBundleManifest] = useState<SyncBundleManifest | null>(null);
@@ -343,6 +358,7 @@ export function App() {
       setSessionStageJournal(null);
       setSessionNativeFileJournal(null);
       setSessionReadinessReport(null);
+      setNativeStoreReport(null);
       setBundleManifest(null);
       setStoreMessage(null);
       setSelectedLocalSessionIds([]);
@@ -610,6 +626,25 @@ export function App() {
     }
   }
 
+  async function discoverNativeSessionStores() {
+    if (!snapshot) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const report = await invoke<NativeSessionStoreDiscoveryReport>('discover_native_session_stores_command', {
+        snapshot,
+        targetHome: targetHomePath || undefined,
+        targetProject: targetProjectPath || undefined,
+        maxSchemaTables: 20
+      });
+      setNativeStoreReport(report);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function refreshJournalHistory() {
     const rows = await invoke<StoredRecord[]>('list_store_records', {
       dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
@@ -838,6 +873,7 @@ export function App() {
               </label>
               <button className="secondary" onClick={refreshJournalHistory} disabled={busy}>Refresh apply journals</button>
               <button className="secondary" onClick={refreshSessionNativeFileJournalHistory} disabled={busy}>Refresh native import journals</button>
+              <button className="secondary" onClick={discoverNativeSessionStores} disabled={!snapshot || busy}>Discover native stores</button>
               <label>
                 Session staging directory
                 <input value={sessionStageDir} onChange={(event) => setSessionStageDir(event.target.value)} placeholder="agent-sync-session-staging" />
@@ -1055,6 +1091,37 @@ export function App() {
             )}
           </section>
         </section>
+
+        {nativeStoreReport && (
+          <section className="panel">
+            <div className="panelTitle">
+              <h2>Native session store discovery</h2>
+              <span>{nativeStoreReport.stores.length} DB/index candidates · schema only</span>
+            </div>
+            {nativeStoreReport.warnings.length > 0 && (
+              <div className="notice">{nativeStoreReport.warnings.join(' / ')}</div>
+            )}
+            {nativeStoreReport.stores.length ? (
+              <ul className="operationList">
+                {nativeStoreReport.stores.slice(0, 60).map((store) => (
+                  <li key={`${store.agent_id}:${store.portable_path}`}>
+                    {store.agent_name} · {store.store_kind} · {store.portable_path} · {store.schema_status}
+                    <small>{store.note}</small>
+                    {store.tables.length > 0 && (
+                      <ul>
+                        {store.tables.map((table) => (
+                          <li key={table.name}>{table.name}: {table.columns.join(', ') || 'no columns'}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="empty">No Codex/Claude DB/index candidates were found in the current scan. Increase scan depth/entries if expected stores are missing.</p>
+            )}
+          </section>
+        )}
 
         <section className="panel">
           <div className="panelTitle">

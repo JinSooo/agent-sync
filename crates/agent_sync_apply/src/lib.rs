@@ -5,6 +5,7 @@ use agent_sync_storage::AgentSyncStore;
 use agent_sync_transform::{ApplyOperationKind, TransformPlan};
 use base64::Engine;
 use chrono::{DateTime, Utc};
+use rusqlite::OpenFlags;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -240,6 +241,47 @@ pub struct SessionNativeImportReadinessEntry {
     pub note: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeSessionStoreDiscoveryOptions {
+    pub target_home: PathBuf,
+    pub target_project: PathBuf,
+    pub max_schema_tables: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeSessionStoreDiscoveryReport {
+    pub stores: Vec<NativeSessionStoreRecord>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeSessionStoreRecord {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub portable_path: String,
+    pub store_kind: NativeSessionStoreKind,
+    pub size: Option<u64>,
+    pub schema_status: String,
+    pub tables: Vec<SqliteTableSummary>,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeSessionStoreKind {
+    Sqlite,
+    LevelDb,
+    IndexedDb,
+    Log,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SqliteTableSummary {
+    pub name: String,
+    pub columns: Vec<String>,
+}
+
 pub fn create_journal(plan: &TransformPlan) -> OperationJournal {
     OperationJournal {
         id: Uuid::new_v4(),
@@ -258,6 +300,71 @@ pub fn create_journal(plan: &TransformPlan) -> OperationJournal {
             .collect(),
         status: JournalStatus::Draft,
     }
+}
+
+pub fn discover_native_session_stores(
+    snapshot: &DeviceSnapshot,
+    options: &NativeSessionStoreDiscoveryOptions,
+) -> NativeSessionStoreDiscoveryReport {
+    let mut stores = Vec::new();
+    let mut warnings = Vec::new();
+    for agent in &snapshot.agents {
+        for finding in &agent.findings {
+            let Some(store_kind) = native_session_store_kind(&finding.portable_path) else {
+                continue;
+            };
+            let (schema_status, tables, note) = match store_kind {
+                NativeSessionStoreKind::Sqlite => match resolve_portable_path(
+                    &finding.portable_path,
+                    &options.target_home,
+                    &options.target_project,
+                ) {
+                    Some(path) => inspect_sqlite_schema(&path, options.max_schema_tables),
+                    None => (
+                        "unresolved".to_string(),
+                        Vec::new(),
+                        "portable path could not be resolved against target home/project"
+                            .to_string(),
+                    ),
+                },
+                NativeSessionStoreKind::LevelDb | NativeSessionStoreKind::IndexedDb => (
+                    "opaque_index".to_string(),
+                    Vec::new(),
+                    "opaque browser/electron index candidate; inventory only, no raw content read"
+                        .to_string(),
+                ),
+                NativeSessionStoreKind::Log => (
+                    "append_log".to_string(),
+                    Vec::new(),
+                    "log-like native store candidate; inventory only, no raw content read"
+                        .to_string(),
+                ),
+                NativeSessionStoreKind::Unknown => (
+                    "unknown".to_string(),
+                    Vec::new(),
+                    "unknown native store candidate; adapter fixture required".to_string(),
+                ),
+            };
+            stores.push(NativeSessionStoreRecord {
+                agent_id: agent.id.clone(),
+                agent_name: agent.name.clone(),
+                portable_path: finding.portable_path.clone(),
+                store_kind,
+                size: finding.size,
+                schema_status,
+                tables,
+                note,
+            });
+        }
+    }
+
+    if stores.is_empty() {
+        warnings.push(
+            "no native DB/index store candidates were found in the scanned Codex/Claude surfaces"
+                .to_string(),
+        );
+    }
+    NativeSessionStoreDiscoveryReport { stores, warnings }
 }
 
 pub fn session_native_import_readiness(
@@ -396,6 +503,127 @@ pub fn session_native_import_readiness(
         blockers,
         entries,
     }
+}
+
+fn native_session_store_kind(portable_path: &str) -> Option<NativeSessionStoreKind> {
+    let lower = portable_path.to_lowercase();
+    if !(lower.starts_with("~/.codex/")
+        || lower.starts_with("~/.claude/")
+        || lower.starts_with("<project>/.codex/")
+        || lower.starts_with("<project>/.claude/")
+        || lower == "~/.codex"
+        || lower == "~/.claude"
+        || lower == "<project>/.codex"
+        || lower == "<project>/.claude")
+    {
+        return None;
+    }
+    if lower.ends_with(".sqlite") || lower.ends_with(".sqlite3") || lower.ends_with(".db") {
+        Some(NativeSessionStoreKind::Sqlite)
+    } else if lower.contains("/leveldb/") || lower.ends_with(".ldb") {
+        Some(NativeSessionStoreKind::LevelDb)
+    } else if lower.contains("/indexeddb/") {
+        Some(NativeSessionStoreKind::IndexedDb)
+    } else if lower.ends_with(".log") {
+        Some(NativeSessionStoreKind::Log)
+    } else {
+        None
+    }
+}
+
+fn resolve_portable_path(
+    portable_path: &str,
+    target_home: &Path,
+    target_project: &Path,
+) -> Option<PathBuf> {
+    if portable_path == "~" {
+        return Some(target_home.to_path_buf());
+    }
+    if let Some(rest) = portable_path.strip_prefix("~/") {
+        if is_safe_portable_relative_path(rest) {
+            return Some(target_home.join(rest));
+        }
+        return None;
+    }
+    if portable_path == "<project>" {
+        return Some(target_project.to_path_buf());
+    }
+    if let Some(rest) = portable_path.strip_prefix("<project>/") {
+        if is_safe_portable_relative_path(rest) {
+            return Some(target_project.join(rest));
+        }
+    }
+    None
+}
+
+fn inspect_sqlite_schema(
+    path: &Path,
+    max_schema_tables: usize,
+) -> (String, Vec<SqliteTableSummary>, String) {
+    if !path.exists() {
+        return (
+            "missing".to_string(),
+            Vec::new(),
+            "SQLite candidate is not present at the resolved target path".to_string(),
+        );
+    }
+    let connection = match rusqlite::Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) {
+        Ok(connection) => connection,
+        Err(error) => {
+            return (
+                "open_failed".to_string(),
+                Vec::new(),
+                format!("could not open as SQLite read-only: {error}"),
+            );
+        }
+    };
+    let mut statement = match connection.prepare(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name LIMIT ?1",
+    ) {
+        Ok(statement) => statement,
+        Err(error) => {
+            return (
+                "schema_failed".to_string(),
+                Vec::new(),
+                format!("could not read SQLite schema: {error}"),
+            );
+        }
+    };
+    let table_names =
+        match statement.query_map([max_schema_tables as i64], |row| row.get::<_, String>(0)) {
+            Ok(rows) => rows.filter_map(Result::ok).collect::<Vec<_>>(),
+            Err(error) => {
+                return (
+                    "schema_failed".to_string(),
+                    Vec::new(),
+                    format!("could not list SQLite tables: {error}"),
+                );
+            }
+        };
+    let mut tables = Vec::new();
+    for table_name in table_names {
+        let quoted = table_name.replace('\'', "''");
+        let pragma = format!("PRAGMA table_info('{quoted}')");
+        let columns = match connection.prepare(&pragma).and_then(|mut statement| {
+            let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+            Ok(rows.filter_map(Result::ok).collect::<Vec<_>>())
+        }) {
+            Ok(columns) => columns,
+            Err(_) => Vec::new(),
+        };
+        tables.push(SqliteTableSummary {
+            name: table_name,
+            columns,
+        });
+    }
+    (
+        "schema_read".to_string(),
+        tables,
+        "SQLite schema read in read-only mode; no row contents were read".to_string(),
+    )
 }
 
 pub fn import_session_archives(
@@ -2329,6 +2557,93 @@ mod tests {
                 .iter()
                 .any(|blocker| blocker.contains("raw session payload is missing"))
         );
+    }
+
+    #[test]
+    fn discovers_sqlite_native_session_store_schema_read_only() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-sync-native-store-discovery-{}",
+            Uuid::new_v4()
+        ));
+        let home = root.join("home");
+        let project = root.join("project");
+        let db_path = home.join(".codex").join("state").join("sessions.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection
+            .execute(
+                "CREATE TABLE conversations (id TEXT PRIMARY KEY, project_path TEXT, title TEXT)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversations (id, project_path, title) VALUES ('secret-id', '/tmp/project', 'do not read row')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let snapshot = agent_sync_core::DeviceSnapshot {
+            schema_version: "0.2".into(),
+            id: Uuid::new_v4(),
+            generated_at: Utc::now(),
+            platform: agent_sync_core::PlatformInfo {
+                os: "test".into(),
+                arch: "test".into(),
+            },
+            inputs: agent_sync_core::SnapshotInputs {
+                home: "~".into(),
+                project: project.display().to_string(),
+                max_depth: 8,
+                max_entries: 10,
+            },
+            summary: agent_sync_core::SnapshotSummary::default(),
+            projects: vec![],
+            agents: vec![agent_sync_core::AgentSnapshot {
+                id: "codex".into(),
+                name: "OpenAI Codex".into(),
+                detected: true,
+                capabilities: Default::default(),
+                roots: vec![],
+                findings: vec![agent_sync_core::Finding {
+                    path: "~/.codex/state/sessions.db".into(),
+                    portable_path: "~/.codex/state/sessions.db".into(),
+                    kind: agent_sync_core::FileKind::File,
+                    depth: 3,
+                    size: fs::metadata(&db_path).ok().map(|metadata| metadata.len()),
+                    mtime: None,
+                    safety_class: agent_sync_core::SafetyClass::Database,
+                    risk: agent_sync_core::RiskLevel::High,
+                    reason: "test fixture".into(),
+                    recommendation: "schema only".into(),
+                    truncated: false,
+                }],
+                sessions: vec![],
+            }],
+        };
+
+        let report = discover_native_session_stores(
+            &snapshot,
+            &NativeSessionStoreDiscoveryOptions {
+                target_home: home,
+                target_project: project,
+                max_schema_tables: 10,
+            },
+        );
+
+        assert!(report.warnings.is_empty());
+        assert_eq!(report.stores.len(), 1);
+        assert_eq!(report.stores[0].store_kind, NativeSessionStoreKind::Sqlite);
+        assert_eq!(report.stores[0].schema_status, "schema_read");
+        assert_eq!(report.stores[0].tables[0].name, "conversations");
+        assert_eq!(
+            report.stores[0].tables[0].columns,
+            vec!["id", "project_path", "title"]
+        );
+        assert!(!format!("{report:?}").contains("do not read row"));
+        let _ = fs::remove_dir_all(root);
     }
 
     fn codex_session_payload_bundle(bytes: Vec<u8>) -> SyncBundle {

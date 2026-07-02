@@ -1,9 +1,11 @@
 use agent_sync_apply::{
-    ApplyContext, ApplyPayloadOptions, OperationJournal, PreflightReport,
+    ApplyContext, ApplyPayloadOptions, NativeSessionStoreDiscoveryOptions,
+    NativeSessionStoreDiscoveryReport, OperationJournal, PreflightReport,
     SessionArchiveImportJournal, SessionArchiveImportOptions, SessionNativeFileImportJournal,
     SessionNativeFileImportOptions, SessionNativeImportReadinessOptions,
     SessionNativeImportReadinessReport, SessionNativeImportStageJournal,
-    SessionNativeImportStageOptions, apply_payloads, create_journal, import_session_archives,
+    SessionNativeImportStageOptions, apply_payloads, create_journal,
+    discover_native_session_stores, import_session_archives,
     import_session_payloads_to_native_files, preflight, rollback_journal,
     rollback_session_native_file_import_journal, session_native_import_readiness,
     stage_session_native_import,
@@ -243,6 +245,31 @@ fn session_native_import_readiness_command(
 }
 
 #[tauri::command]
+fn discover_native_session_stores_command(
+    snapshot: DeviceSnapshot,
+    target_home: Option<String>,
+    target_project: Option<String>,
+    max_schema_tables: Option<usize>,
+) -> Result<NativeSessionStoreDiscoveryReport, String> {
+    let target_home = target_home
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let target_project = match target_project {
+        Some(project) => PathBuf::from(project),
+        None => std::env::current_dir().map_err(|error| error.to_string())?,
+    };
+    Ok(discover_native_session_stores(
+        &snapshot,
+        &NativeSessionStoreDiscoveryOptions {
+            target_home,
+            target_project,
+            max_schema_tables: max_schema_tables.unwrap_or(20),
+        },
+    ))
+}
+
+#[tauri::command]
 fn import_session_payloads_to_native_files_command(
     bundle: SyncBundle,
     selected_session_ids: Vec<String>,
@@ -311,6 +338,7 @@ pub fn run() {
             import_session_archives_command,
             stage_session_native_import_command,
             session_native_import_readiness_command,
+            discover_native_session_stores_command,
             import_session_payloads_to_native_files_command,
             rollback_session_native_file_import_journal_command,
             save_snapshot_to_store,
