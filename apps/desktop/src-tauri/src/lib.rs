@@ -17,8 +17,9 @@ use agent_sync_apply::{
 use agent_sync_bundle::{
     BundleDeviceKeySummary, BundleExportOptions, BundleFileDecryptionOptions,
     BundleFileEncryptionOptions, PayloadSelectionRef, SyncBundle, SyncBundleManifest,
-    bundle_recipient_from_input, export_bundle, generate_bundle_device_key_file,
-    manifest_from_snapshot, read_bundle_device_key_file, read_bundle_file_with_decryption,
+    bundle_recipient_from_input, delete_bundle_device_key_keyring, export_bundle,
+    generate_bundle_device_key_file, generate_bundle_device_key_keyring, manifest_from_snapshot,
+    read_bundle_device_key_file, read_bundle_device_key_keyring, read_bundle_file_with_decryption,
     verify_bundle, write_bundle_file_with_encryption, write_bundle_recipient_file,
 };
 use agent_sync_core::DeviceSnapshot;
@@ -83,11 +84,32 @@ fn generate_bundle_key_file(output: String) -> Result<BundleDeviceKeySummary, St
 }
 
 #[tauri::command]
+fn generate_bundle_key_keyring(account: String) -> Result<BundleDeviceKeySummary, String> {
+    generate_bundle_device_key_keyring(account).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn forget_bundle_key_keyring(account: String) -> Result<(), String> {
+    delete_bundle_device_key_keyring(account).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn export_bundle_recipient_file(
     key_path: String,
     output: String,
 ) -> Result<BundleDeviceKeySummary, String> {
     let key = read_bundle_device_key_file(key_path).map_err(|error| error.to_string())?;
+    let recipient = BundleDeviceKeySummary::from(&key);
+    write_bundle_recipient_file(&recipient, output).map_err(|error| error.to_string())?;
+    Ok(recipient)
+}
+
+#[tauri::command]
+fn export_bundle_recipient_keyring(
+    account: String,
+    output: String,
+) -> Result<BundleDeviceKeySummary, String> {
+    let key = read_bundle_device_key_keyring(account).map_err(|error| error.to_string())?;
     let recipient = BundleDeviceKeySummary::from(&key);
     write_bundle_recipient_file(&recipient, output).map_err(|error| error.to_string())?;
     Ok(recipient)
@@ -107,6 +129,7 @@ fn export_bundle_file(
     allow_unencrypted_sensitive_payloads: Option<bool>,
     encryption_passphrase: Option<String>,
     encryption_key_path: Option<String>,
+    encryption_keychain_account: Option<String>,
     encryption_recipient_inputs: Option<Vec<String>>,
 ) -> Result<SyncBundleManifest, String> {
     let home = home
@@ -120,6 +143,7 @@ fn export_bundle_file(
     let encryption = bundle_file_encryption_options(
         encryption_passphrase,
         encryption_key_path,
+        encryption_keychain_account,
         encryption_recipient_inputs.unwrap_or_default(),
     )?;
     let bundle = export_bundle(
@@ -149,8 +173,13 @@ fn read_bundle(
     path: String,
     encryption_passphrase: Option<String>,
     encryption_key_path: Option<String>,
+    encryption_keychain_account: Option<String>,
 ) -> Result<SyncBundle, String> {
-    let decryption = bundle_file_decryption_options(encryption_passphrase, encryption_key_path)?;
+    let decryption = bundle_file_decryption_options(
+        encryption_passphrase,
+        encryption_key_path,
+        encryption_keychain_account,
+    )?;
     read_bundle_file_with_decryption(path, &decryption).map_err(|error| error.to_string())
 }
 
@@ -454,6 +483,7 @@ fn nonempty(value: Option<String>) -> Option<String> {
 fn bundle_file_encryption_options(
     passphrase: Option<String>,
     key_path: Option<String>,
+    keychain_account: Option<String>,
     recipient_inputs: Vec<String>,
 ) -> Result<BundleFileEncryptionOptions, String> {
     let passphrase = nonempty(passphrase);
@@ -461,8 +491,15 @@ fn bundle_file_encryption_options(
         .map(read_bundle_device_key_file)
         .transpose()
         .map_err(|error| error.to_string())?;
+    let keychain_key = nonempty(keychain_account)
+        .map(read_bundle_device_key_keyring)
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let mut recipients = Vec::new();
     if let Some(key) = key {
+        recipients.push(key.age_recipient);
+    }
+    if let Some(key) = keychain_key {
         recipients.push(key.age_recipient);
     }
     for input in recipient_inputs {
@@ -474,7 +511,7 @@ fn bundle_file_encryption_options(
     }
     if passphrase.is_some() && !recipients.is_empty() {
         return Err(
-            "Bundle passphrase is mutually exclusive with bundle key files or recipients"
+            "Bundle passphrase is mutually exclusive with bundle key files, OS keychain keys, or recipients"
                 .to_string(),
         );
     }
@@ -487,18 +524,31 @@ fn bundle_file_encryption_options(
 fn bundle_file_decryption_options(
     passphrase: Option<String>,
     key_path: Option<String>,
+    keychain_account: Option<String>,
 ) -> Result<BundleFileDecryptionOptions, String> {
     let passphrase = nonempty(passphrase);
     let key = nonempty(key_path)
         .map(read_bundle_device_key_file)
         .transpose()
         .map_err(|error| error.to_string())?;
-    if passphrase.is_some() && key.is_some() {
-        return Err("Bundle passphrase and bundle key file are mutually exclusive".to_string());
+    let keychain_key = nonempty(keychain_account)
+        .map(read_bundle_device_key_keyring)
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let identities = key
+        .into_iter()
+        .chain(keychain_key)
+        .map(|key| key.age_identity)
+        .collect::<Vec<_>>();
+    if passphrase.is_some() && !identities.is_empty() {
+        return Err(
+            "Bundle passphrase is mutually exclusive with bundle key files or OS keychain keys"
+                .to_string(),
+        );
     }
     Ok(BundleFileDecryptionOptions {
         passphrase,
-        identities: key.map(|key| vec![key.age_identity]).unwrap_or_default(),
+        identities,
     })
 }
 
@@ -511,7 +561,10 @@ pub fn run() {
             create_transform_plan_command,
             create_bundle_manifest,
             generate_bundle_key_file,
+            generate_bundle_key_keyring,
+            forget_bundle_key_keyring,
             export_bundle_recipient_file,
+            export_bundle_recipient_keyring,
             export_bundle_file,
             read_bundle,
             verify_bundle_command,

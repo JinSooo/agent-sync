@@ -394,6 +394,7 @@ export function App() {
   const [allowUnencryptedSensitiveExport, setAllowUnencryptedSensitiveExport] = useState(false);
   const [bundlePassphrase, setBundlePassphrase] = useState('');
   const [bundleKeyPath, setBundleKeyPath] = useState('');
+  const [bundleKeychainAccount, setBundleKeychainAccount] = useState('');
   const [bundleRecipientInputs, setBundleRecipientInputs] = useState('');
   const [storeMessage, setStoreMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -458,6 +459,7 @@ export function App() {
     try {
       const encryptionPassphrase = bundlePassphrase.length > 0 ? bundlePassphrase : undefined;
       const encryptionKeyPath = bundleKeyPath.length > 0 ? bundleKeyPath : undefined;
+      const encryptionKeychainAccount = bundleKeychainAccount.trim() || undefined;
       const encryptionRecipientInputs = bundleRecipientInputsToArray(bundleRecipientInputs);
       const manifest = await invoke<SyncBundleManifest>('export_bundle_file', {
         snapshot,
@@ -470,6 +472,7 @@ export function App() {
         allowUnencryptedSensitivePayloads: allowUnencryptedSensitiveExport,
         encryptionPassphrase,
         encryptionKeyPath,
+        encryptionKeychainAccount,
         encryptionRecipientInputs
       });
       setBundleManifest(manifest);
@@ -488,7 +491,8 @@ export function App() {
     try {
       const encryptionPassphrase = bundlePassphrase.length > 0 ? bundlePassphrase : undefined;
       const encryptionKeyPath = bundleKeyPath.length > 0 ? bundleKeyPath : undefined;
-      const bundle = await invoke<SyncBundle>('read_bundle', { path: bundlePath, encryptionPassphrase, encryptionKeyPath });
+      const encryptionKeychainAccount = bundleKeychainAccount.trim() || undefined;
+      const bundle = await invoke<SyncBundle>('read_bundle', { path: bundlePath, encryptionPassphrase, encryptionKeyPath, encryptionKeychainAccount });
       const errors = await invoke<string[]>('verify_bundle_command', { bundle });
       setImportedBundle(bundle);
       setRemoteSnapshot(bundle.source_snapshot);
@@ -919,6 +923,21 @@ export function App() {
     }
   }
 
+  async function generateBundleKeychain() {
+    const account = bundleKeychainAccount.trim() || 'default-bundle-key';
+    setBusy(true);
+    setError(null);
+    try {
+      const key = await invoke<BundleDeviceKeySummary>('generate_bundle_key_keyring', { account });
+      setBundleKeychainAccount(account);
+      setStoreMessage(`OS keychain bundle key stored: ${key.id}`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function exportBundleRecipient() {
     if (!bundleKeyPath) {
       setError('Choose or generate a private bundle key file first.');
@@ -935,6 +954,48 @@ export function App() {
       const recipient = await invoke<BundleDeviceKeySummary>('export_bundle_recipient_file', { keyPath: bundleKeyPath, output: selected });
       setBundleRecipientInputs((current) => [...bundleRecipientInputsToArray(current), selected].join('\n'));
       setStoreMessage(`public recipient exported: ${recipient.id}`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportBundleKeychainRecipient() {
+    const account = bundleKeychainAccount.trim();
+    if (!account) {
+      setError('Enter an OS keychain account or store a key first.');
+      return;
+    }
+    const selected = await save({
+      defaultPath: 'agent-sync-recipient.json',
+      filters: [{ name: 'Agent Sync Public Recipient', extensions: ['json'] }]
+    });
+    if (!selected) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const recipient = await invoke<BundleDeviceKeySummary>('export_bundle_recipient_keyring', { account, output: selected });
+      setBundleRecipientInputs((current) => [...bundleRecipientInputsToArray(current), selected].join('\n'));
+      setStoreMessage(`OS keychain public recipient exported: ${recipient.id}`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function forgetBundleKeychain() {
+    const account = bundleKeychainAccount.trim();
+    if (!account) {
+      setError('Enter an OS keychain account to forget.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke<void>('forget_bundle_key_keyring', { account });
+      setStoreMessage(`OS keychain bundle key removed: ${account}`);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1030,9 +1091,10 @@ export function App() {
   const sensitiveLocalPayloadSelected = selectedLocalReviewPayloadKeys.length > 0 || selectedLocalSessionIds.length > 0;
   const bundlePassphraseProvided = bundlePassphrase.length > 0;
   const bundleKeyProvided = bundleKeyPath.length > 0;
+  const bundleKeychainProvided = bundleKeychainAccount.trim().length > 0;
   const bundleRecipientsProvided = bundleRecipientInputsToArray(bundleRecipientInputs).length > 0;
-  const bundleEncryptionInputConflict = bundlePassphraseProvided && (bundleKeyProvided || bundleRecipientsProvided);
-  const bundleEncryptedExportSelected = bundlePassphraseProvided || bundleKeyProvided || bundleRecipientsProvided;
+  const bundleEncryptionInputConflict = bundlePassphraseProvided && (bundleKeyProvided || bundleKeychainProvided || bundleRecipientsProvided);
+  const bundleEncryptedExportSelected = bundlePassphraseProvided || bundleKeyProvided || bundleKeychainProvided || bundleRecipientsProvided;
   const selectedOperations = useMemo(() => (plan ? plan.operations.filter((operation) => selectedOperationIds.includes(operation.id)) : []), [plan, selectedOperationIds]);
   const selectedReviewOperations = useMemo(() => selectedOperations.filter(isReviewPayloadApplicable), [selectedOperations]);
   const autoApplicableCount = plan?.operations.filter(isAutoApplicable).length ?? 0;
@@ -1196,6 +1258,15 @@ export function App() {
               <button className="secondary" onClick={generateBundleKey} disabled={busy}>Generate key…</button>
               <button className="secondary" onClick={exportBundleRecipient} disabled={busy || !bundleKeyPath}>Export public recipient…</button>
               <label>
+                OS keychain account
+                <input value={bundleKeychainAccount} onChange={(event) => setBundleKeychainAccount(event.target.value)} placeholder="default-bundle-key" />
+              </label>
+              <div className="chips">
+                <button className="secondary" onClick={generateBundleKeychain} disabled={busy}>Store/rotate key in OS keychain</button>
+                <button className="secondary" onClick={exportBundleKeychainRecipient} disabled={busy || !bundleKeychainAccount.trim()}>Export keychain public recipient…</button>
+                <button className="secondary dangerButton" onClick={forgetBundleKeychain} disabled={busy || !bundleKeychainAccount.trim()}>Forget keychain key</button>
+              </div>
+              <label>
                 Additional public recipients
                 <textarea value={bundleRecipientInputs} onChange={(event) => setBundleRecipientInputs(event.target.value)} placeholder="one age1... recipient or agent-sync-recipient.json path per line" />
               </label>
@@ -1210,7 +1281,7 @@ export function App() {
               <button onClick={createImportPlan} disabled={!snapshot || !remoteSnapshot || busy}>Plan remote → local</button>
             </div>
             {bundleEncryptionInputConflict && (
-              <p className="notice">Use either a bundle passphrase or device/public-recipient encryption, not both.</p>
+              <p className="notice">Use either a bundle passphrase or device/public-recipient/OS-keychain encryption, not both.</p>
             )}
             {sensitiveLocalPayloadSelected && !bundleEncryptedExportSelected && (
               <label className="ackBox">

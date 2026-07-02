@@ -8,6 +8,7 @@ version.workspace = true
 agent_sync_core = { path = "../agent_sync_core" }
 age.workspace = true
 base64.workspace = true
+keyring.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true

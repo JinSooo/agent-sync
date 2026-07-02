@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 const BUNDLE_ENCRYPTION_METHOD_AGE_SCRYPT: &str = "age:scrypt:v1";
 const BUNDLE_ENCRYPTION_METHOD_AGE_X25519: &str = "age:x25519:v1";
+const BUNDLE_KEYRING_SERVICE: &str = "agent-sync-studio";
+pub const DEFAULT_BUNDLE_KEYRING_ACCOUNT: &str = "default-bundle-key";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SyncBundleManifest {
@@ -467,6 +469,47 @@ pub fn generate_bundle_device_key_file(path: impl AsRef<Path>) -> std::io::Resul
     Ok(key)
 }
 
+pub fn write_bundle_device_key_keyring(
+    account: impl AsRef<str>,
+    key: &BundleDeviceKey,
+) -> std::io::Result<BundleDeviceKeySummary> {
+    let account = normalized_keyring_account(account)?;
+    parse_age_recipient(&key.age_recipient)?;
+    parse_age_identity(&key.age_identity)?;
+    let json = serde_json::to_string(key).map_err(std::io::Error::other)?;
+    keyring_entry(&account)?
+        .set_password(&json)
+        .map_err(keyring_error)?;
+    Ok(BundleDeviceKeySummary::from(key))
+}
+
+pub fn generate_bundle_device_key_keyring(
+    account: impl AsRef<str>,
+) -> std::io::Result<BundleDeviceKeySummary> {
+    let key = generate_bundle_device_key();
+    write_bundle_device_key_keyring(account, &key)
+}
+
+pub fn read_bundle_device_key_keyring(
+    account: impl AsRef<str>,
+) -> std::io::Result<BundleDeviceKey> {
+    let account = normalized_keyring_account(account)?;
+    let json = keyring_entry(&account)?
+        .get_password()
+        .map_err(keyring_error)?;
+    let key: BundleDeviceKey = serde_json::from_str(&json).map_err(std::io::Error::other)?;
+    parse_age_recipient(&key.age_recipient)?;
+    parse_age_identity(&key.age_identity)?;
+    Ok(key)
+}
+
+pub fn delete_bundle_device_key_keyring(account: impl AsRef<str>) -> std::io::Result<()> {
+    let account = normalized_keyring_account(account)?;
+    keyring_entry(&account)?
+        .delete_credential()
+        .map_err(keyring_error)
+}
+
 pub fn write_bundle_recipient_file(
     recipient: &BundleDeviceKeySummary,
     path: impl AsRef<Path>,
@@ -481,6 +524,25 @@ pub fn read_bundle_device_key_file(path: impl AsRef<Path>) -> std::io::Result<Bu
     parse_age_recipient(&key.age_recipient)?;
     parse_age_identity(&key.age_identity)?;
     Ok(key)
+}
+
+pub fn normalized_keyring_account(account: impl AsRef<str>) -> std::io::Result<String> {
+    let account = account.as_ref().trim();
+    if account.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "keychain account must not be empty",
+        ));
+    }
+    Ok(account.to_string())
+}
+
+fn keyring_entry(account: &str) -> std::io::Result<keyring::Entry> {
+    keyring::Entry::new(BUNDLE_KEYRING_SERVICE, account).map_err(keyring_error)
+}
+
+fn keyring_error(error: keyring::Error) -> std::io::Error {
+    std::io::Error::other(format!("OS keychain error: {error}"))
 }
 
 pub fn read_bundle_recipient_file(
@@ -680,6 +742,15 @@ mod tests {
         SessionImportCapabilities, SessionRecord, SessionVisibility, SnapshotInputs,
         SnapshotSummary,
     };
+
+    #[test]
+    fn normalizes_keyring_account_and_rejects_empty_values() {
+        assert_eq!(
+            normalized_keyring_account("  work-laptop  ").unwrap(),
+            "work-laptop"
+        );
+        assert!(normalized_keyring_account("   ").is_err());
+    }
 
     #[test]
     fn exports_safe_payload_and_redacts_secret() {

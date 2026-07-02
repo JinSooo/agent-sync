@@ -10,10 +10,11 @@ use agent_sync_apply::{
 };
 use agent_sync_bundle::{
     BundleDeviceKeySummary, BundleExportOptions, BundleFileDecryptionOptions,
-    BundleFileEncryptionOptions, PayloadSelectionRef, bundle_recipient_from_input, export_bundle,
-    generate_bundle_device_key_file, manifest_from_snapshot, read_bundle_device_key_file,
-    read_bundle_file_with_decryption, verify_bundle, write_bundle_file_with_encryption,
-    write_bundle_recipient_file,
+    BundleFileEncryptionOptions, DEFAULT_BUNDLE_KEYRING_ACCOUNT, PayloadSelectionRef,
+    bundle_recipient_from_input, delete_bundle_device_key_keyring, export_bundle,
+    generate_bundle_device_key_file, generate_bundle_device_key_keyring, manifest_from_snapshot,
+    read_bundle_device_key_file, read_bundle_device_key_keyring, read_bundle_file_with_decryption,
+    verify_bundle, write_bundle_file_with_encryption, write_bundle_recipient_file,
 };
 use agent_sync_scan::{ScanOptions, scan_device};
 use agent_sync_transform::create_transform_plan;
@@ -50,6 +51,11 @@ fn main() -> anyhow::Result<()> {
                 serde_json::to_string_pretty(&BundleDeviceKeySummary::from(&key))?
             );
         }
+        "generate-bundle-keychain" => {
+            let account = bundle_keychain_account_or_default(&args);
+            let recipient = generate_bundle_device_key_keyring(&account)?;
+            println!("{}", serde_json::to_string_pretty(&recipient)?);
+        }
         "export-bundle-recipient" => {
             let key_path = bundle_key_path(&args)
                 .ok_or_else(|| anyhow::anyhow!("--bundle-key PATH is required"))?;
@@ -59,6 +65,26 @@ fn main() -> anyhow::Result<()> {
                 write_bundle_recipient_file(&recipient, output)?;
             }
             println!("{}", serde_json::to_string_pretty(&recipient)?);
+        }
+        "export-bundle-keychain-recipient" => {
+            let account = bundle_keychain_account_or_default(&args);
+            let key = read_bundle_device_key_keyring(&account)?;
+            let recipient = BundleDeviceKeySummary::from(&key);
+            if let Some(output) = value_after(&args, "--output") {
+                write_bundle_recipient_file(&recipient, output)?;
+            }
+            println!("{}", serde_json::to_string_pretty(&recipient)?);
+        }
+        "forget-bundle-keychain" => {
+            let account = bundle_keychain_account_or_default(&args);
+            delete_bundle_device_key_keyring(&account)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "deleted",
+                    "account": account
+                })
+            );
         }
         "export-bundle" => {
             let output =
@@ -246,7 +272,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|export-bundle-recipient|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH|--bundle-recipient AGE_OR_JSON --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --session-target SESSION_ID=PROJECT_PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
+                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|generate-bundle-keychain|export-bundle-recipient|export-bundle-keychain-recipient|forget-bundle-keychain|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH|--bundle-keychain ACCOUNT|--bundle-recipient AGE_OR_JSON --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --session-target SESSION_ID=PROJECT_PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
             );
             std::process::exit(2);
         }
@@ -341,13 +367,30 @@ fn bundle_key_path(args: &[String]) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn bundle_keychain_account(args: &[String]) -> Option<String> {
+    value_after(args, "--bundle-keychain")
+        .or_else(|| env::var("AGENT_SYNC_BUNDLE_KEYCHAIN").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn bundle_keychain_account_or_default(args: &[String]) -> String {
+    bundle_keychain_account(args).unwrap_or_else(|| DEFAULT_BUNDLE_KEYRING_ACCOUNT.to_string())
+}
+
 fn bundle_file_encryption_options(args: &[String]) -> anyhow::Result<BundleFileEncryptionOptions> {
     let passphrase = bundle_passphrase(args);
     let key = bundle_key_path(args)
         .map(read_bundle_device_key_file)
         .transpose()?;
+    let keychain_key = bundle_keychain_account(args)
+        .map(read_bundle_device_key_keyring)
+        .transpose()?;
     let mut recipients = Vec::new();
     if let Some(key) = key {
+        recipients.push(key.age_recipient);
+    }
+    if let Some(key) = keychain_key {
         recipients.push(key.age_recipient);
     }
     for input in values_after(args, "--bundle-recipient") {
@@ -355,7 +398,7 @@ fn bundle_file_encryption_options(args: &[String]) -> anyhow::Result<BundleFileE
     }
     if passphrase.is_some() && !recipients.is_empty() {
         anyhow::bail!(
-            "--bundle-passphrase is mutually exclusive with --bundle-key/--bundle-recipient"
+            "--bundle-passphrase is mutually exclusive with --bundle-key/--bundle-keychain/--bundle-recipient"
         );
     }
     Ok(BundleFileEncryptionOptions {
@@ -369,12 +412,22 @@ fn bundle_file_decryption_options(args: &[String]) -> anyhow::Result<BundleFileD
     let key = bundle_key_path(args)
         .map(read_bundle_device_key_file)
         .transpose()?;
-    if passphrase.is_some() && key.is_some() {
-        anyhow::bail!("--bundle-passphrase and --bundle-key are mutually exclusive");
+    let keychain_key = bundle_keychain_account(args)
+        .map(read_bundle_device_key_keyring)
+        .transpose()?;
+    let identities = key
+        .into_iter()
+        .chain(keychain_key)
+        .map(|key| key.age_identity)
+        .collect::<Vec<_>>();
+    if passphrase.is_some() && !identities.is_empty() {
+        anyhow::bail!(
+            "--bundle-passphrase is mutually exclusive with --bundle-key/--bundle-keychain"
+        );
     }
     Ok(BundleFileDecryptionOptions {
         passphrase,
-        identities: key.map(|key| vec![key.age_identity]).unwrap_or_default(),
+        identities,
     })
 }
 
