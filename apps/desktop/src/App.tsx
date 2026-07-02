@@ -277,15 +277,45 @@ type NativeSessionStoreDiscoveryReport = {
 
 type NativeSessionProjectRemapPreviewReport = {
   warnings: string[];
-  candidates: Array<{
+  candidates: NativeSessionProjectRemapCandidate[];
+};
+
+type NativeSessionProjectRemapCandidate = NativeSessionProjectRemapSelection & {
+  agent_name: string;
+  confidence: number;
+  reason: string;
+  write_supported: boolean;
+};
+
+type NativeSessionProjectRemapSelection = {
+  agent_id: string;
+  portable_path: string;
+  table: string;
+  column: string;
+};
+
+type NativeSessionProjectRemapJournal = {
+  id: string;
+  status: string;
+  selected: number;
+  remapped: number;
+  skipped: number;
+  blockers: string[];
+  records: Array<{
     agent_id: string;
     agent_name: string;
     portable_path: string;
+    db_path: string;
     table: string;
     column: string;
-    confidence: number;
-    reason: string;
-    write_supported: boolean;
+    source_project: string;
+    target_project: string;
+    backup_path?: string;
+    backup_sha256?: string;
+    matched_rows: number;
+    updated_rows: number;
+    status: string;
+    message?: string;
   }>;
 };
 
@@ -337,14 +367,17 @@ export function App() {
   const [sessionReadinessReport, setSessionReadinessReport] = useState<SessionNativeImportReadinessReport | null>(null);
   const [nativeStoreReport, setNativeStoreReport] = useState<NativeSessionStoreDiscoveryReport | null>(null);
   const [nativeRemapPreview, setNativeRemapPreview] = useState<NativeSessionProjectRemapPreviewReport | null>(null);
+  const [nativeRemapJournal, setNativeRemapJournal] = useState<NativeSessionProjectRemapJournal | null>(null);
   const [journalHistory, setJournalHistory] = useState<StoredRecord[]>([]);
   const [sessionNativeFileJournalHistory, setSessionNativeFileJournalHistory] = useState<StoredRecord[]>([]);
+  const [nativeRemapJournalHistory, setNativeRemapJournalHistory] = useState<StoredRecord[]>([]);
   const [bundleManifest, setBundleManifest] = useState<SyncBundleManifest | null>(null);
   const [verifyErrors, setVerifyErrors] = useState<string[]>([]);
   const [selectedOperationIds, setSelectedOperationIds] = useState<string[]>([]);
   const [selectedSessionIds, setSelectedSessionIds] = useState<string[]>([]);
   const [selectedLocalSessionIds, setSelectedLocalSessionIds] = useState<string[]>([]);
   const [selectedLocalReviewPayloadKeys, setSelectedLocalReviewPayloadKeys] = useState<string[]>([]);
+  const [selectedNativeRemapKeys, setSelectedNativeRemapKeys] = useState<string[]>([]);
   const [reviewApplyAcknowledged, setReviewApplyAcknowledged] = useState(false);
   const [allowUnencryptedSensitiveExport, setAllowUnencryptedSensitiveExport] = useState(false);
   const [storeMessage, setStoreMessage] = useState<string | null>(null);
@@ -375,6 +408,8 @@ export function App() {
       setSessionReadinessReport(null);
       setNativeStoreReport(null);
       setNativeRemapPreview(null);
+      setNativeRemapJournal(null);
+      setSelectedNativeRemapKeys([]);
       setBundleManifest(null);
       setStoreMessage(null);
       setSelectedLocalSessionIds([]);
@@ -444,6 +479,8 @@ export function App() {
       setSessionNativeFileJournal(null);
       setSessionReadinessReport(null);
       setNativeRemapPreview(null);
+      setNativeRemapJournal(null);
+      setSelectedNativeRemapKeys([]);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -675,6 +712,63 @@ export function App() {
         maxSchemaTables: 20
       });
       setNativeRemapPreview(report);
+      setNativeRemapJournal(null);
+      setSelectedNativeRemapKeys([]);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function applyNativeSessionProjectRemap() {
+    if (!snapshot) return;
+    const sourceProject = remoteSnapshot?.inputs.project;
+    if (!sourceProject) {
+      setError('Import a source bundle first so Agent Sync can use its source project path for exact DB remap matching.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const journal = await invoke<NativeSessionProjectRemapJournal>('apply_native_session_project_remap_command', {
+        snapshot,
+        targetHome: targetHomePath || undefined,
+        targetProject: targetProjectPath || undefined,
+        sourceProject,
+        backupDir: backupDir || 'agent-sync-backups',
+        selections: selectedNativeRemapCandidates.map(remapCandidateToSelection),
+        requireAgentsStopped
+      });
+      setNativeRemapJournal(journal);
+      const id = await invoke<string>('save_native_session_project_remap_journal', {
+        dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
+        journal
+      });
+      setStoreMessage(`native DB remap journal saved: ${id}`);
+      await refreshNativeRemapJournalHistory();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rollbackNativeSessionProjectRemap() {
+    if (!nativeRemapJournal) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const journal = await invoke<NativeSessionProjectRemapJournal>('rollback_native_session_project_remap_journal_command', {
+        journal: nativeRemapJournal
+      });
+      setNativeRemapJournal(journal);
+      const id = await invoke<string>('save_native_session_project_remap_journal', {
+        dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
+        journal
+      });
+      setStoreMessage(`native DB remap rollback journal saved: ${id}`);
+      await refreshNativeRemapJournalHistory();
     } catch (err) {
       setError(String(err));
     } finally {
@@ -698,6 +792,14 @@ export function App() {
     setSessionNativeFileJournalHistory(rows);
   }
 
+  async function refreshNativeRemapJournalHistory() {
+    const rows = await invoke<StoredRecord[]>('list_store_records', {
+      dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
+      kind: 'native_session_project_remap_journal'
+    });
+    setNativeRemapJournalHistory(rows);
+  }
+
   async function loadJournalFromHistory(record: StoredRecord) {
     setError(null);
     try {
@@ -717,6 +819,17 @@ export function App() {
       setStoreMessage(`native file import journal loaded: ${record.id}`);
     } catch (err) {
       setError(`Failed to parse stored native file import journal ${record.id}: ${String(err)}`);
+    }
+  }
+
+  async function loadNativeRemapJournalFromHistory(record: StoredRecord) {
+    setError(null);
+    try {
+      const parsed = JSON.parse(record.json) as NativeSessionProjectRemapJournal;
+      setNativeRemapJournal(parsed);
+      setStoreMessage(`native DB remap journal loaded: ${record.id}`);
+    } catch (err) {
+      setError(`Failed to parse stored native DB remap journal ${record.id}: ${String(err)}`);
     }
   }
 
@@ -787,6 +900,10 @@ export function App() {
     setSelectedLocalReviewPayloadKeys((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key]);
   }
 
+  function toggleNativeRemapCandidate(key: string) {
+    setSelectedNativeRemapKeys((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key]);
+  }
+
   const agents = snapshot?.agents ?? [];
   const detected = agents.filter((agent) => agent.detected);
   const totalSessions = useMemo(() => agents.reduce((count, agent) => count + agent.sessions.length, 0), [agents]);
@@ -826,6 +943,9 @@ export function App() {
     const capabilities = targetAgentCapabilities(archive.agent_id);
     return hasDeclaredCapabilities(capabilities) && capabilities.can_remap_session_project;
   });
+  const selectedNativeRemapCandidates = useMemo(() => (
+    nativeRemapPreview?.candidates.filter((candidate) => selectedNativeRemapKeys.includes(nativeRemapCandidateKey(candidate))) ?? []
+  ), [nativeRemapPreview, selectedNativeRemapKeys]);
 
   return (
     <main className="shell">
@@ -910,6 +1030,7 @@ export function App() {
               </label>
               <button className="secondary" onClick={refreshJournalHistory} disabled={busy}>Refresh apply journals</button>
               <button className="secondary" onClick={refreshSessionNativeFileJournalHistory} disabled={busy}>Refresh native import journals</button>
+              <button className="secondary" onClick={refreshNativeRemapJournalHistory} disabled={busy}>Refresh DB remap journals</button>
               <button className="secondary" onClick={discoverNativeSessionStores} disabled={!snapshot || busy}>Discover native stores</button>
               <button className="secondary" onClick={previewNativeSessionProjectRemap} disabled={!snapshot || busy}>Preview DB remap columns</button>
               <label>
@@ -1165,20 +1286,38 @@ export function App() {
           <section className="panel">
             <div className="panelTitle">
               <h2>Native DB/index project-remap preview</h2>
-              <span>{nativeRemapPreview.candidates.length} schema candidates · no writes</span>
+              <span>{selectedNativeRemapKeys.length}/{nativeRemapPreview.candidates.length} selected · SQLite exact-match apply</span>
             </div>
             {nativeRemapPreview.warnings.length > 0 && (
               <div className="notice">{nativeRemapPreview.warnings.join(' / ')}</div>
             )}
             {nativeRemapPreview.candidates.length ? (
-              <ul className="operationList">
-                {nativeRemapPreview.candidates.slice(0, 80).map((candidate) => (
-                  <li key={`${candidate.agent_id}:${candidate.portable_path}:${candidate.table}:${candidate.column}`}>
-                    {candidate.agent_name} · {candidate.portable_path} · {candidate.table}.{candidate.column} · confidence {candidate.confidence}% · {candidate.write_supported ? 'write supported' : 'preview only'}
-                    <small>{candidate.reason}</small>
-                  </li>
-                ))}
-              </ul>
+              <div className="stack">
+                <div className="chips">
+                  <button className="secondary smallButton" onClick={() => setSelectedNativeRemapKeys(nativeRemapPreview.candidates.map(nativeRemapCandidateKey))} disabled={busy}>Select all candidates</button>
+                  <button className="secondary smallButton" onClick={() => setSelectedNativeRemapKeys([])} disabled={busy}>Clear</button>
+                  <button onClick={applyNativeSessionProjectRemap} disabled={!snapshot || !remoteSnapshot || selectedNativeRemapCandidates.length === 0 || busy}>
+                    Apply selected DB remap
+                  </button>
+                </div>
+                {!remoteSnapshot && (
+                  <div className="notice">Import a source bundle before applying DB remap; the source bundle project path is used as the exact match value.</div>
+                )}
+                <div className="operationTable compact">
+                  {nativeRemapPreview.candidates.slice(0, 80).map((candidate) => {
+                    const key = nativeRemapCandidateKey(candidate);
+                    return (
+                      <label key={key} className="operationItem">
+                        <input type="checkbox" checked={selectedNativeRemapKeys.includes(key)} onChange={() => toggleNativeRemapCandidate(key)} />
+                        <span>
+                          <strong>{candidate.agent_name}</strong> · {candidate.portable_path} · {candidate.table}.{candidate.column}
+                          <small>confidence {candidate.confidence}% · {candidate.write_supported ? 'explicit apply supported with backup' : 'preview only'} · {candidate.reason}</small>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
             ) : (
               <p className="empty">No likely project path columns found in discovered SQLite stores.</p>
             )}
@@ -1352,6 +1491,37 @@ export function App() {
             </ul>
           </section>
         )}
+        {nativeRemapJournal && (
+          <section className="panel">
+            <div className="panelTitle">
+              <h2>Native DB remap journal</h2>
+              <span>{nativeRemapJournal.id} · {nativeRemapJournal.status}</span>
+            </div>
+            <button className="secondary" onClick={rollbackNativeSessionProjectRemap} disabled={busy || nativeRemapJournal.status === 'rolled_back'}>
+              Rollback native DB remap
+            </button>
+            <div className="chips">
+              <span className="chip safe_config">remapped {nativeRemapJournal.remapped}</span>
+              <span className="chip">selected {nativeRemapJournal.selected}</span>
+              <span className="chip">skipped {nativeRemapJournal.skipped}</span>
+            </div>
+            {nativeRemapJournal.blockers.length > 0 && (
+              <div className="preflight fail">
+                Native DB remap blocked
+                <small>{nativeRemapJournal.blockers.join(' / ')}</small>
+              </div>
+            )}
+            <ul className="operationList">
+              {nativeRemapJournal.records.map((record) => (
+                <li key={`${record.agent_id}:${record.portable_path}:${record.table}:${record.column}`}>
+                  {record.status} · {record.agent_name} · {record.table}.{record.column} · matched {record.matched_rows} · updated {record.updated_rows}
+                  <small>{record.source_project} → {record.target_project}</small>
+                  <small>{record.db_path || record.portable_path}{record.backup_path ? ` · backup ${record.backup_path}` : ''}{record.message ? ` · ${record.message}` : ''}</small>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
         <section className="panel">
           <div className="panelTitle">
             <h2>Native file import journal history</h2>
@@ -1371,6 +1541,27 @@ export function App() {
             </ul>
           ) : (
             <p className="empty">Native file import journals are saved automatically after import/rollback. Refresh to load rollback points from the local SQLite store.</p>
+          )}
+        </section>
+        <section className="panel">
+          <div className="panelTitle">
+            <h2>Native DB remap journal history</h2>
+            <span>{nativeRemapJournalHistory.length} stored in {archiveStorePath || 'agent-sync-studio.sqlite'}</span>
+          </div>
+          {nativeRemapJournalHistory.length ? (
+            <ul className="operationList">
+              {nativeRemapJournalHistory.slice(0, 20).map((record) => {
+                const summary = storedNativeRemapJournalSummary(record);
+                return (
+                  <li key={record.id}>
+                    <button className="secondary smallButton" onClick={() => loadNativeRemapJournalFromHistory(record)} disabled={busy}>Load</button>{' '}
+                    {record.id} · {summary.status} · remapped {summary.remapped} · records {summary.records} · updated {record.updated_at}
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="empty">Native DB remap journals are saved automatically after apply/rollback. Refresh to load rollback points from the local SQLite store.</p>
           )}
         </section>
       </section>
@@ -1408,6 +1599,24 @@ function payloadKeyToSelection(key: string): PayloadSelectionRef {
   };
 }
 
+function nativeRemapCandidateKey(candidate: NativeSessionProjectRemapSelection): string {
+  return [
+    candidate.agent_id,
+    candidate.portable_path,
+    candidate.table,
+    candidate.column
+  ].map(encodeURIComponent).join(':');
+}
+
+function remapCandidateToSelection(candidate: NativeSessionProjectRemapCandidate): NativeSessionProjectRemapSelection {
+  return {
+    agent_id: candidate.agent_id,
+    portable_path: candidate.portable_path,
+    table: candidate.table,
+    column: candidate.column
+  };
+}
+
 function storedJournalSummary(record: StoredRecord): { status: string; operations: number } {
   try {
     const journal = JSON.parse(record.json) as OperationJournal;
@@ -1423,6 +1632,15 @@ function storedSessionNativeFileJournalSummary(record: StoredRecord): { status: 
     return { status: journal.status, imported: journal.imported, records: journal.records.length };
   } catch {
     return { status: 'invalid_json', imported: 0, records: 0 };
+  }
+}
+
+function storedNativeRemapJournalSummary(record: StoredRecord): { status: string; remapped: number; records: number } {
+  try {
+    const journal = JSON.parse(record.json) as NativeSessionProjectRemapJournal;
+    return { status: journal.status, remapped: journal.remapped, records: journal.records.length };
+  } catch {
+    return { status: 'invalid_json', remapped: 0, records: 0 };
   }
 }
 

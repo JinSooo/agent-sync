@@ -1,14 +1,17 @@
 use agent_sync_apply::{
-    ApplyContext, ApplyPayloadOptions, NativeSessionProjectRemapPreviewOptions,
-    NativeSessionProjectRemapPreviewReport, NativeSessionStoreDiscoveryOptions,
-    NativeSessionStoreDiscoveryReport, OperationJournal, PreflightReport,
-    SessionArchiveImportJournal, SessionArchiveImportOptions, SessionNativeFileImportJournal,
-    SessionNativeFileImportOptions, SessionNativeImportReadinessOptions,
-    SessionNativeImportReadinessReport, SessionNativeImportStageJournal,
-    SessionNativeImportStageOptions, apply_payloads, create_journal,
+    ApplyContext, ApplyPayloadOptions, NativeSessionProjectRemapApplyOptions,
+    NativeSessionProjectRemapJournal, NativeSessionProjectRemapPreviewOptions,
+    NativeSessionProjectRemapPreviewReport, NativeSessionProjectRemapSelection,
+    NativeSessionStoreDiscoveryOptions, NativeSessionStoreDiscoveryReport, OperationJournal,
+    PreflightReport, SessionArchiveImportJournal, SessionArchiveImportOptions,
+    SessionNativeFileImportJournal, SessionNativeFileImportOptions,
+    SessionNativeImportReadinessOptions, SessionNativeImportReadinessReport,
+    SessionNativeImportStageJournal, SessionNativeImportStageOptions,
+    apply_native_session_project_remap, apply_payloads, create_journal,
     discover_native_session_stores, import_session_archives,
     import_session_payloads_to_native_files, preflight, preview_native_session_project_remap,
-    rollback_journal, rollback_session_native_file_import_journal, session_native_import_readiness,
+    rollback_journal, rollback_native_session_project_remap_journal,
+    rollback_session_native_file_import_journal, session_native_import_readiness,
     stage_session_native_import,
 };
 use agent_sync_bundle::{
@@ -189,6 +192,21 @@ fn save_session_native_file_import_journal(
 }
 
 #[tauri::command]
+fn save_native_session_project_remap_journal(
+    db_path: String,
+    journal: NativeSessionProjectRemapJournal,
+) -> Result<String, String> {
+    let store = AgentSyncStore::open(db_path).map_err(|error| error.to_string())?;
+    store
+        .save_json(
+            "native_session_project_remap_journal",
+            Some(journal.id),
+            &journal,
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn import_session_archives_command(
     bundle: SyncBundle,
     db_path: String,
@@ -298,6 +316,45 @@ fn preview_native_session_project_remap_command(
 }
 
 #[tauri::command]
+fn apply_native_session_project_remap_command(
+    snapshot: DeviceSnapshot,
+    target_home: Option<String>,
+    target_project: Option<String>,
+    source_project: String,
+    backup_dir: String,
+    selections: Vec<NativeSessionProjectRemapSelection>,
+    require_agents_stopped: Option<bool>,
+) -> Result<NativeSessionProjectRemapJournal, String> {
+    let target_home = target_home
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let target_project = match target_project {
+        Some(project) => PathBuf::from(project),
+        None => std::env::current_dir().map_err(|error| error.to_string())?,
+    };
+    apply_native_session_project_remap(
+        &snapshot,
+        &NativeSessionProjectRemapApplyOptions {
+            target_home,
+            target_project,
+            source_project,
+            backup_dir: PathBuf::from(backup_dir),
+            selections,
+            require_agents_stopped: require_agents_stopped.unwrap_or(true),
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn rollback_native_session_project_remap_journal_command(
+    journal: NativeSessionProjectRemapJournal,
+) -> Result<NativeSessionProjectRemapJournal, String> {
+    rollback_native_session_project_remap_journal(&journal).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn import_session_payloads_to_native_files_command(
     bundle: SyncBundle,
     selected_session_ids: Vec<String>,
@@ -363,11 +420,14 @@ pub fn run() {
             rollback_journal_command,
             save_operation_journal,
             save_session_native_file_import_journal,
+            save_native_session_project_remap_journal,
             import_session_archives_command,
             stage_session_native_import_command,
             session_native_import_readiness_command,
             discover_native_session_stores_command,
             preview_native_session_project_remap_command,
+            apply_native_session_project_remap_command,
+            rollback_native_session_project_remap_journal_command,
             import_session_payloads_to_native_files_command,
             rollback_session_native_file_import_journal_command,
             save_snapshot_to_store,

@@ -5,7 +5,7 @@ use agent_sync_storage::AgentSyncStore;
 use agent_sync_transform::{ApplyOperationKind, TransformPlan};
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use rusqlite::OpenFlags;
+use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -308,6 +308,55 @@ pub struct NativeSessionProjectRemapCandidate {
     pub write_supported: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeSessionProjectRemapSelection {
+    pub agent_id: String,
+    pub portable_path: String,
+    pub table: String,
+    pub column: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeSessionProjectRemapApplyOptions {
+    pub target_home: PathBuf,
+    pub target_project: PathBuf,
+    pub source_project: String,
+    pub backup_dir: PathBuf,
+    pub selections: Vec<NativeSessionProjectRemapSelection>,
+    pub require_agents_stopped: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeSessionProjectRemapJournal {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub selected: usize,
+    pub remapped: usize,
+    pub skipped: usize,
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    pub records: Vec<NativeSessionProjectRemapRecord>,
+    pub status: JournalStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeSessionProjectRemapRecord {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub portable_path: String,
+    pub db_path: String,
+    pub table: String,
+    pub column: String,
+    pub source_project: String,
+    pub target_project: String,
+    pub backup_path: Option<String>,
+    pub backup_sha256: Option<String>,
+    pub matched_rows: u64,
+    pub updated_rows: u64,
+    pub status: JournalOperationStatus,
+    pub message: Option<String>,
+}
+
 pub fn create_journal(plan: &TransformPlan) -> OperationJournal {
     OperationJournal {
         id: Uuid::new_v4(),
@@ -422,7 +471,7 @@ pub fn preview_native_session_project_remap(
                         column,
                         confidence,
                         reason,
-                        write_supported: false,
+                        write_supported: true,
                     });
                 }
             }
@@ -452,7 +501,7 @@ pub fn preview_native_session_project_remap(
         );
     } else {
         warnings.push(
-            "preview is schema-only: no database rows were read and no native DB/index writes are supported yet"
+            "preview is schema-only: no database rows were read; SQLite writes require explicit candidate selection, source project, backup, and stopped-agent preflight"
                 .to_string(),
         );
     }
@@ -460,6 +509,134 @@ pub fn preview_native_session_project_remap(
         candidates,
         warnings,
     }
+}
+
+pub fn apply_native_session_project_remap(
+    snapshot: &DeviceSnapshot,
+    options: &NativeSessionProjectRemapApplyOptions,
+) -> std::io::Result<NativeSessionProjectRemapJournal> {
+    let running_processes = if options.require_agents_stopped {
+        match detect_running_agent_processes(&selected_agent_ids_from_remap(options)) {
+            Ok(processes) => processes,
+            Err(error) => {
+                return Ok(blocked_native_session_project_remap_journal(
+                    options,
+                    vec![format!(
+                        "could not verify Codex/Claude stopped state: {error}; retry after stopping agents or use the explicit skip option"
+                    )],
+                ));
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    apply_native_session_project_remap_with_processes(snapshot, options, &running_processes)
+}
+
+pub fn apply_native_session_project_remap_with_processes(
+    snapshot: &DeviceSnapshot,
+    options: &NativeSessionProjectRemapApplyOptions,
+    running_processes: &[RunningAgentProcess],
+) -> std::io::Result<NativeSessionProjectRemapJournal> {
+    let mut blockers = Vec::new();
+    if options.selections.is_empty() {
+        blockers.push("no native DB/index remap candidates were selected".to_string());
+    }
+    if options.source_project.trim().is_empty() {
+        blockers.push("source project is required for exact DB remap matching".to_string());
+    }
+    let target_project = options.target_project.display().to_string();
+    if target_project.trim().is_empty() {
+        blockers.push("target project is required for DB remap replacement".to_string());
+    }
+    if options.source_project == target_project {
+        blockers.push(
+            "source project and target project are identical; remap would be a no-op".to_string(),
+        );
+    }
+    if options.require_agents_stopped {
+        blockers.extend(running_agent_blockers_for_agent_ids(
+            &selected_agent_ids_from_remap(options),
+            running_processes,
+        ));
+    }
+    if !blockers.is_empty() {
+        return Ok(blocked_native_session_project_remap_journal(
+            options, blockers,
+        ));
+    }
+
+    fs::create_dir_all(&options.backup_dir)?;
+    let discovery = discover_native_session_stores(
+        snapshot,
+        &NativeSessionStoreDiscoveryOptions {
+            target_home: options.target_home.clone(),
+            target_project: options.target_project.clone(),
+            max_schema_tables: 10_000,
+        },
+    );
+    let mut backup_by_db: BTreeMap<PathBuf, (PathBuf, String)> = BTreeMap::new();
+    let mut records = Vec::new();
+
+    for selection in &options.selections {
+        let Some(store) = discovery.stores.iter().find(|store| {
+            store.agent_id == selection.agent_id && store.portable_path == selection.portable_path
+        }) else {
+            records.push(failed_native_remap_record(
+                selection,
+                "",
+                &options.source_project,
+                &target_project,
+                "selected native store was not found in the current target scan",
+            ));
+            continue;
+        };
+        let record = match apply_one_native_project_remap(
+            store,
+            selection,
+            &options.source_project,
+            &target_project,
+            &options.target_home,
+            &options.target_project,
+            &options.backup_dir,
+            &mut backup_by_db,
+        ) {
+            Ok(record) => record,
+            Err(message) => failed_native_remap_record(
+                selection,
+                "",
+                &options.source_project,
+                &target_project,
+                &message,
+            ),
+        };
+        records.push(record);
+    }
+
+    let remapped = records
+        .iter()
+        .filter(|record| {
+            record.status == JournalOperationStatus::Verified && record.updated_rows > 0
+        })
+        .count();
+    let failed = records.iter().any(|record| {
+        record.status == JournalOperationStatus::Failed
+            || record.status == JournalOperationStatus::Blocked
+    });
+    Ok(NativeSessionProjectRemapJournal {
+        id: Uuid::new_v4(),
+        created_at: Utc::now(),
+        selected: options.selections.len(),
+        remapped,
+        skipped: options.selections.len().saturating_sub(remapped),
+        blockers: Vec::new(),
+        records,
+        status: if failed {
+            JournalStatus::Failed
+        } else {
+            JournalStatus::Completed
+        },
+    })
 }
 
 pub fn session_native_import_readiness(
@@ -657,6 +834,10 @@ fn project_remap_column_reason(column: &str) -> Option<(u8, String)> {
     } else {
         None
     }
+}
+
+fn quote_sqlite_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 fn resolve_portable_path(
@@ -1148,6 +1329,17 @@ fn running_agent_blockers(
     let selected_agents = selected_agent_ids_with_payloads(bundle, options)
         .into_iter()
         .collect::<BTreeSet<_>>();
+    running_agent_blockers_for_agent_ids(
+        &selected_agents.into_iter().collect::<Vec<_>>(),
+        running_processes,
+    )
+}
+
+fn running_agent_blockers_for_agent_ids(
+    agent_ids: &[String],
+    running_processes: &[RunningAgentProcess],
+) -> Vec<String> {
+    let selected_agents = agent_ids.iter().cloned().collect::<BTreeSet<_>>();
     let mut blockers = Vec::new();
     for process in running_processes {
         if selected_agents.contains(&process.agent_id) {
@@ -1160,6 +1352,195 @@ fn running_agent_blockers(
     blockers.sort();
     blockers.dedup();
     blockers
+}
+
+fn selected_agent_ids_from_remap(options: &NativeSessionProjectRemapApplyOptions) -> Vec<String> {
+    options
+        .selections
+        .iter()
+        .map(|selection| selection.agent_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn apply_one_native_project_remap(
+    store: &NativeSessionStoreRecord,
+    selection: &NativeSessionProjectRemapSelection,
+    source_project: &str,
+    target_project: &str,
+    target_home: &Path,
+    target_project_path: &Path,
+    backup_dir: &Path,
+    backup_by_db: &mut BTreeMap<PathBuf, (PathBuf, String)>,
+) -> Result<NativeSessionProjectRemapRecord, String> {
+    if store.store_kind != NativeSessionStoreKind::Sqlite {
+        return Err(
+            "selected native store is not SQLite; opaque DB/index remap is not supported"
+                .to_string(),
+        );
+    }
+    if store.schema_status != "schema_read" {
+        return Err(format!(
+            "selected SQLite store schema is not readable: {}",
+            store.schema_status
+        ));
+    }
+    let Some(table) = store
+        .tables
+        .iter()
+        .find(|table| table.name == selection.table)
+    else {
+        return Err("selected table was not found in the SQLite schema".to_string());
+    };
+    if !table
+        .columns
+        .iter()
+        .any(|column| column == &selection.column)
+    {
+        return Err("selected column was not found in the SQLite schema".to_string());
+    }
+    if project_remap_column_reason(&selection.column).is_none() {
+        return Err(
+            "selected column is not recognized as a project identity column by the current rules"
+                .to_string(),
+        );
+    }
+    let db_path = resolve_portable_path(&selection.portable_path, target_home, target_project_path)
+        .ok_or_else(|| {
+            "portable SQLite path could not be resolved against target home/project".to_string()
+        })?;
+    if !db_path.exists() {
+        return Err("resolved SQLite database path does not exist".to_string());
+    }
+    let (backup_path, backup_sha) = if let Some(existing) = backup_by_db.get(&db_path) {
+        existing.clone()
+    } else {
+        let backup_path = backup_dir.join(format!(
+            "{}-{}",
+            Uuid::new_v4(),
+            sanitize_path(&selection.portable_path)
+        ));
+        fs::copy(&db_path, &backup_path).map_err(|error| {
+            format!(
+                "failed to create SQLite backup {}: {error}",
+                backup_path.display()
+            )
+        })?;
+        let backup_bytes = fs::read(&backup_path)
+            .map_err(|error| format!("failed to read SQLite backup for checksum: {error}"))?;
+        let backup_sha = format!("{:x}", Sha256::digest(&backup_bytes));
+        backup_by_db.insert(db_path.clone(), (backup_path.clone(), backup_sha.clone()));
+        (backup_path, backup_sha)
+    };
+
+    let mut connection = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| format!("could not open SQLite database read-write: {error}"))?;
+    let quoted_table = quote_sqlite_identifier(&selection.table);
+    let quoted_column = quote_sqlite_identifier(&selection.column);
+    let count_sql = format!("SELECT COUNT(*) FROM {quoted_table} WHERE {quoted_column} = ?1");
+    let update_sql =
+        format!("UPDATE {quoted_table} SET {quoted_column} = ?1 WHERE {quoted_column} = ?2");
+    let tx = connection
+        .transaction()
+        .map_err(|error| format!("could not start SQLite remap transaction: {error}"))?;
+    let matched_rows = tx
+        .query_row(&count_sql, params![source_project], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|error| format!("could not count source-project rows: {error}"))?;
+    let updated_rows = tx
+        .execute(&update_sql, params![target_project, source_project])
+        .map_err(|error| format!("could not update project identity rows: {error}"))?;
+    tx.commit()
+        .map_err(|error| format!("could not commit SQLite remap transaction: {error}"))?;
+
+    Ok(NativeSessionProjectRemapRecord {
+        agent_id: store.agent_id.clone(),
+        agent_name: store.agent_name.clone(),
+        portable_path: selection.portable_path.clone(),
+        db_path: db_path.display().to_string(),
+        table: selection.table.clone(),
+        column: selection.column.clone(),
+        source_project: source_project.to_string(),
+        target_project: target_project.to_string(),
+        backup_path: Some(backup_path.display().to_string()),
+        backup_sha256: Some(backup_sha),
+        matched_rows: matched_rows.max(0) as u64,
+        updated_rows: updated_rows as u64,
+        status: JournalOperationStatus::Verified,
+        message: Some(if updated_rows == 0 {
+            "SQLite remap transaction committed; no rows matched the exact source project"
+                .to_string()
+        } else {
+            "SQLite remap transaction committed and row count recorded".to_string()
+        }),
+    })
+}
+
+fn failed_native_remap_record(
+    selection: &NativeSessionProjectRemapSelection,
+    db_path: &str,
+    source_project: &str,
+    target_project: &str,
+    message: &str,
+) -> NativeSessionProjectRemapRecord {
+    NativeSessionProjectRemapRecord {
+        agent_id: selection.agent_id.clone(),
+        agent_name: selection.agent_id.clone(),
+        portable_path: selection.portable_path.clone(),
+        db_path: db_path.to_string(),
+        table: selection.table.clone(),
+        column: selection.column.clone(),
+        source_project: source_project.to_string(),
+        target_project: target_project.to_string(),
+        backup_path: None,
+        backup_sha256: None,
+        matched_rows: 0,
+        updated_rows: 0,
+        status: JournalOperationStatus::Failed,
+        message: Some(message.to_string()),
+    }
+}
+
+fn blocked_native_session_project_remap_journal(
+    options: &NativeSessionProjectRemapApplyOptions,
+    blockers: Vec<String>,
+) -> NativeSessionProjectRemapJournal {
+    let target_project = options.target_project.display().to_string();
+    let records = options
+        .selections
+        .iter()
+        .map(|selection| NativeSessionProjectRemapRecord {
+            agent_id: selection.agent_id.clone(),
+            agent_name: selection.agent_id.clone(),
+            portable_path: selection.portable_path.clone(),
+            db_path: String::new(),
+            table: selection.table.clone(),
+            column: selection.column.clone(),
+            source_project: options.source_project.clone(),
+            target_project: target_project.clone(),
+            backup_path: None,
+            backup_sha256: None,
+            matched_rows: 0,
+            updated_rows: 0,
+            status: JournalOperationStatus::Blocked,
+            message: Some(blockers.join(" / ")),
+        })
+        .collect();
+    NativeSessionProjectRemapJournal {
+        id: Uuid::new_v4(),
+        created_at: Utc::now(),
+        selected: options.selections.len(),
+        remapped: 0,
+        skipped: options.selections.len(),
+        blockers,
+        records,
+        status: JournalStatus::Failed,
+    }
 }
 
 fn blocked_session_native_file_import_journal(
@@ -1606,6 +1987,77 @@ pub fn rollback_session_native_file_import_journal(
         rolled_back.status = JournalStatus::Failed;
     }
 
+    Ok(rolled_back)
+}
+
+pub fn rollback_native_session_project_remap_journal(
+    journal: &NativeSessionProjectRemapJournal,
+) -> std::io::Result<NativeSessionProjectRemapJournal> {
+    let mut rolled_back = journal.clone();
+    rolled_back.status = JournalStatus::RolledBack;
+    let mut restored_backups = BTreeSet::new();
+
+    for record in &mut rolled_back.records {
+        if record.status != JournalOperationStatus::Verified {
+            continue;
+        }
+        let Some(backup_path) = record.backup_path.clone() else {
+            record.status = JournalOperationStatus::Failed;
+            record.message = Some("no SQLite backup available for rollback".to_string());
+            rolled_back.status = JournalStatus::Failed;
+            continue;
+        };
+        if record.db_path.is_empty() {
+            record.status = JournalOperationStatus::Failed;
+            record.message = Some("no SQLite database path available for rollback".to_string());
+            rolled_back.status = JournalStatus::Failed;
+            continue;
+        }
+        let backup_key = format!("{}=>{}", backup_path, record.db_path);
+        if !restored_backups.insert(backup_key) {
+            record.status = JournalOperationStatus::RolledBack;
+            record.message = Some("SQLite backup already restored for this database".to_string());
+            continue;
+        }
+
+        let db_path = PathBuf::from(&record.db_path);
+        let backup_path = PathBuf::from(&backup_path);
+        let backup_bytes = fs::read(&backup_path)?;
+        let backup_sha = format!("{:x}", Sha256::digest(&backup_bytes));
+        if record
+            .backup_sha256
+            .as_deref()
+            .is_some_and(|expected| expected != backup_sha)
+        {
+            record.status = JournalOperationStatus::Failed;
+            record.message = Some("SQLite backup checksum changed; rollback refused".to_string());
+            rolled_back.status = JournalStatus::Failed;
+            continue;
+        }
+        if let Some(parent) = db_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&backup_path, &db_path)?;
+        let restored = fs::read(&db_path)?;
+        let restored_sha = format!("{:x}", Sha256::digest(&restored));
+        if restored_sha == backup_sha {
+            record.status = JournalOperationStatus::RolledBack;
+            record.message =
+                Some("restored SQLite database backup and checksum verified".to_string());
+        } else {
+            record.status = JournalOperationStatus::Failed;
+            record.message = Some("restored SQLite database checksum mismatch".to_string());
+            rolled_back.status = JournalStatus::Failed;
+        }
+    }
+
+    if rolled_back
+        .records
+        .iter()
+        .any(|record| record.status == JournalOperationStatus::Failed)
+    {
+        rolled_back.status = JournalStatus::Failed;
+    }
     Ok(rolled_back)
 }
 
@@ -2775,7 +3227,7 @@ mod tests {
     }
 
     #[test]
-    fn previews_sqlite_project_remap_candidates_without_write_support() {
+    fn previews_sqlite_project_remap_candidates_with_explicit_write_support() {
         let root = std::env::temp_dir().join(format!(
             "agent-sync-native-remap-preview-{}",
             Uuid::new_v4()
@@ -2856,7 +3308,7 @@ mod tests {
             report
                 .candidates
                 .iter()
-                .all(|candidate| !candidate.write_supported)
+                .all(|candidate| candidate.write_supported)
         );
         assert!(
             report
@@ -2866,6 +3318,186 @@ mod tests {
         );
         assert!(!format!("{report:?}").contains("do not read row"));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn applies_and_rolls_back_sqlite_project_remap_with_backup() {
+        let root =
+            std::env::temp_dir().join(format!("agent-sync-native-remap-apply-{}", Uuid::new_v4()));
+        let home = root.join("home");
+        let project = root.join("target-project");
+        let backup = root.join("backup");
+        let db_path = home.join(".codex").join("state").join("sessions.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection
+            .execute(
+                "CREATE TABLE conversations (id TEXT PRIMARY KEY, project_path TEXT, cwd TEXT, title TEXT)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversations (id, project_path, cwd, title) VALUES ('one', '/source/project', '/source/project', 'session one')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversations (id, project_path, cwd, title) VALUES ('two', '/other/project', '/other/project', 'session two')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let snapshot = sqlite_store_snapshot(&project, &db_path);
+        let journal = apply_native_session_project_remap_with_processes(
+            &snapshot,
+            &NativeSessionProjectRemapApplyOptions {
+                target_home: home.clone(),
+                target_project: project.clone(),
+                source_project: "/source/project".into(),
+                backup_dir: backup.clone(),
+                selections: vec![NativeSessionProjectRemapSelection {
+                    agent_id: "codex".into(),
+                    portable_path: "~/.codex/state/sessions.db".into(),
+                    table: "conversations".into(),
+                    column: "project_path".into(),
+                }],
+                require_agents_stopped: true,
+            },
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(journal.status, JournalStatus::Completed);
+        assert_eq!(journal.remapped, 1);
+        assert_eq!(journal.records[0].matched_rows, 1);
+        assert_eq!(journal.records[0].updated_rows, 1);
+        assert!(journal.records[0].backup_path.is_some());
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        let remapped: String = connection
+            .query_row(
+                "SELECT project_path FROM conversations WHERE id = 'one'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let untouched: String = connection
+            .query_row(
+                "SELECT project_path FROM conversations WHERE id = 'two'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(connection);
+        assert_eq!(remapped, project.display().to_string());
+        assert_eq!(untouched, "/other/project");
+
+        let rolled_back = rollback_native_session_project_remap_journal(&journal).unwrap();
+        assert_eq!(rolled_back.status, JournalStatus::RolledBack);
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        let restored: String = connection
+            .query_row(
+                "SELECT project_path FROM conversations WHERE id = 'one'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(restored, "/source/project");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn blocks_sqlite_project_remap_when_agent_is_running() {
+        let root =
+            std::env::temp_dir().join(format!("agent-sync-native-remap-block-{}", Uuid::new_v4()));
+        let home = root.join("home");
+        let project = root.join("target-project");
+        let backup = root.join("backup");
+        let db_path = home.join(".codex").join("state").join("sessions.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection
+            .execute(
+                "CREATE TABLE conversations (id TEXT PRIMARY KEY, project_path TEXT)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let snapshot = sqlite_store_snapshot(&project, &db_path);
+        let journal = apply_native_session_project_remap_with_processes(
+            &snapshot,
+            &NativeSessionProjectRemapApplyOptions {
+                target_home: home,
+                target_project: project,
+                source_project: "/source/project".into(),
+                backup_dir: backup,
+                selections: vec![NativeSessionProjectRemapSelection {
+                    agent_id: "codex".into(),
+                    portable_path: "~/.codex/state/sessions.db".into(),
+                    table: "conversations".into(),
+                    column: "project_path".into(),
+                }],
+                require_agents_stopped: true,
+            },
+            &[RunningAgentProcess {
+                agent_id: "codex".into(),
+                pid: 42,
+                executable: "codex".into(),
+                command: "codex".into(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(journal.status, JournalStatus::Failed);
+        assert_eq!(journal.records[0].status, JournalOperationStatus::Blocked);
+        assert!(journal.blockers[0].contains("appears to be running"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn sqlite_store_snapshot(project: &Path, db_path: &Path) -> agent_sync_core::DeviceSnapshot {
+        agent_sync_core::DeviceSnapshot {
+            schema_version: "0.2".into(),
+            id: Uuid::new_v4(),
+            generated_at: Utc::now(),
+            platform: agent_sync_core::PlatformInfo {
+                os: "test".into(),
+                arch: "test".into(),
+            },
+            inputs: agent_sync_core::SnapshotInputs {
+                home: "~".into(),
+                project: project.display().to_string(),
+                max_depth: 8,
+                max_entries: 10,
+            },
+            summary: agent_sync_core::SnapshotSummary::default(),
+            projects: vec![],
+            agents: vec![agent_sync_core::AgentSnapshot {
+                id: "codex".into(),
+                name: "OpenAI Codex".into(),
+                detected: true,
+                capabilities: Default::default(),
+                roots: vec![],
+                findings: vec![agent_sync_core::Finding {
+                    path: "~/.codex/state/sessions.db".into(),
+                    portable_path: "~/.codex/state/sessions.db".into(),
+                    kind: agent_sync_core::FileKind::File,
+                    depth: 3,
+                    size: fs::metadata(db_path).ok().map(|metadata| metadata.len()),
+                    mtime: None,
+                    safety_class: agent_sync_core::SafetyClass::Database,
+                    risk: agent_sync_core::RiskLevel::High,
+                    reason: "test fixture".into(),
+                    recommendation: "schema only".into(),
+                    truncated: false,
+                }],
+                sessions: vec![],
+            }],
+        }
     }
 
     fn codex_session_payload_bundle(bytes: Vec<u8>) -> SyncBundle {

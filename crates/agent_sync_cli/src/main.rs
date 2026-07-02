@@ -1,9 +1,12 @@
 use agent_sync_apply::{
-    NativeSessionProjectRemapPreviewOptions, NativeSessionStoreDiscoveryOptions, OperationJournal,
-    SessionNativeFileImportJournal, SessionNativeFileImportOptions,
-    SessionNativeImportReadinessOptions, create_journal, discover_native_session_stores,
+    NativeSessionProjectRemapApplyOptions, NativeSessionProjectRemapJournal,
+    NativeSessionProjectRemapPreviewOptions, NativeSessionProjectRemapSelection,
+    NativeSessionStoreDiscoveryOptions, OperationJournal, SessionNativeFileImportJournal,
+    SessionNativeFileImportOptions, SessionNativeImportReadinessOptions,
+    apply_native_session_project_remap, create_journal, discover_native_session_stores,
     import_session_payloads_to_native_files, preflight, preview_native_session_project_remap,
-    rollback_journal, rollback_session_native_file_import_journal, session_native_import_readiness,
+    rollback_journal, rollback_native_session_project_remap_journal,
+    rollback_session_native_file_import_journal, session_native_import_readiness,
 };
 use agent_sync_bundle::{
     BundleExportOptions, PayloadSelectionRef, export_bundle, manifest_from_snapshot,
@@ -124,6 +127,28 @@ fn main() -> anyhow::Result<()> {
             );
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        "apply-native-remap" => {
+            let options = default_scan_options(&args);
+            let snapshot = scan_device(options.clone())?;
+            let source_project = value_after(&args, "--source-project").unwrap_or_default();
+            let backup_dir = value_after(&args, "--backup-dir")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("agent-sync-db-remap-backups"));
+            let journal = apply_native_session_project_remap(
+                &snapshot,
+                &NativeSessionProjectRemapApplyOptions {
+                    target_home: options.home,
+                    target_project: options.project,
+                    source_project,
+                    backup_dir,
+                    selections: remap_selection_values(&args),
+                    require_agents_stopped: !args
+                        .iter()
+                        .any(|arg| arg == "--skip-agent-stopped-check"),
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&journal)?);
+        }
         "import-native-sessions" => {
             let input =
                 value_after(&args, "--input").unwrap_or_else(|| "agent-sync.asbundle".to_string());
@@ -170,6 +195,14 @@ fn main() -> anyhow::Result<()> {
             let rolled_back = rollback_session_native_file_import_journal(&journal)?;
             println!("{}", serde_json::to_string_pretty(&rolled_back)?);
         }
+        "rollback-native-remap-journal" => {
+            let input = value_after(&args, "--input")
+                .unwrap_or_else(|| "agent-sync-native-remap-journal.json".to_string());
+            let bytes = std::fs::read(input)?;
+            let journal: NativeSessionProjectRemapJournal = serde_json::from_slice(&bytes)?;
+            let rolled_back = rollback_native_session_project_remap_journal(&journal)?;
+            println!("{}", serde_json::to_string_pretty(&rolled_back)?);
+        }
         "self-plan" => {
             let snapshot = scan_device(default_scan_options(&args))?;
             let plan = create_transform_plan(&snapshot, &snapshot, None);
@@ -182,7 +215,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
+                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
             );
             std::process::exit(2);
         }
@@ -278,6 +311,24 @@ fn payload_selection_values(args: &[String], flag: &str) -> Vec<PayloadSelection
                     agent_id: agent_id.to_string(),
                     portable_path: portable_path.to_string(),
                 })
+        })
+        .collect()
+}
+
+fn remap_selection_values(args: &[String]) -> Vec<NativeSessionProjectRemapSelection> {
+    values_after(args, "--candidate")
+        .into_iter()
+        .filter_map(|value| {
+            let parts = value.split('|').collect::<Vec<_>>();
+            if parts.len() != 4 || parts.iter().any(|part| part.is_empty()) {
+                return None;
+            }
+            Some(NativeSessionProjectRemapSelection {
+                agent_id: parts[0].to_string(),
+                portable_path: parts[1].to_string(),
+                table: parts[2].to_string(),
+                column: parts[3].to_string(),
+            })
         })
         .collect()
 }
