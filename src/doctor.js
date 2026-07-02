@@ -34,9 +34,10 @@ function redactHome(filePath, homeDir) {
 }
 
 function portablePath(filePath, options) {
-  return redactBase(filePath, options.project, '<project>')
+  const portable = redactBase(filePath, options.project, '<project>')
     || redactBase(filePath, options.home, '~')
     || filePath;
+  return String(portable).replace(/\\/g, '/');
 }
 
 function rootRecord(filePath, scope, exists, options, note) {
