@@ -1,0 +1,14 @@
+[package]
+name = "agent_sync_bundle"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+agent_sync_core = { path = "../agent_sync_core" }
+base64.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+uuid.workspace = true

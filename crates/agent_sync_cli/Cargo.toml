@@ -1,0 +1,17 @@
+[package]
+name = "agent_sync_cli"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "agent-sync-rs"
+path = "src/main.rs"
+
+[dependencies]
+agent_sync_apply = { path = "../agent_sync_apply" }
+agent_sync_bundle = { path = "../agent_sync_bundle" }
+agent_sync_scan = { path = "../agent_sync_scan" }
+agent_sync_transform = { path = "../agent_sync_transform" }
+anyhow.workspace = true
+serde_json.workspace = true

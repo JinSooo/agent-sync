@@ -1,0 +1,28 @@
+[package]
+name = "agent-sync-desktop"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "agent_sync_desktop"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "agent-sync-studio"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+agent_sync_apply = { path = "../../../crates/agent_sync_apply" }
+agent_sync_bundle = { path = "../../../crates/agent_sync_bundle" }
+agent_sync_core = { path = "../../../crates/agent_sync_core" }
+agent_sync_scan = { path = "../../../crates/agent_sync_scan" }
+agent_sync_storage = { path = "../../../crates/agent_sync_storage" }
+agent_sync_transform = { path = "../../../crates/agent_sync_transform" }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2.7.1"

@@ -1,0 +1,11 @@
+[package]
+name = "agent_sync_transform"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+agent_sync_core = { path = "../agent_sync_core" }
+chrono.workspace = true
+serde.workspace = true
+uuid.workspace = true

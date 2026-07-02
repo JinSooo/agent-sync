@@ -4,6 +4,22 @@ coverage/
 dist/
 *.tgz
 
+# Rust/Tauri build artifacts
+/target/
+/apps/desktop/src-tauri/target/
+/apps/desktop/dist/
+/apps/desktop/node_modules/
+/apps/desktop/.vite/
+
 # Local agent/runtime artifacts
 .omc/
 .omx/
+
+# Local machine snapshots and sync bundles
+mac.json
+windows.json
+linux.json
+*.snapshot.json
+agent-sync-*.json
+*.asbundle
+*.asbundle.tmp

@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Agent Sync Studio default desktop capability. The frontend only reaches narrow Rust commands registered by the app.","local":true,"windows":["main"],"permissions":["core:default","dialog:default"]}}

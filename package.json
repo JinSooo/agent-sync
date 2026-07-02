@@ -1,15 +1,20 @@
 {
   "name": "agent-sync",
-  "version": "0.1.0",
-  "description": "Read-only inventory and drift diagnostics for AI coding agent setup state.",
+  "version": "0.2.0",
+  "description": "Tauri-first cross-platform visual sync studio for Codex and Claude Code agent state.",
   "type": "module",
   "bin": {
     "agent-sync": "./bin/agent-sync.js"
   },
   "scripts": {
     "test": "node --test",
-    "doctor": "node ./bin/agent-sync.js doctor",
-    "check": "node --check ./bin/agent-sync.js && node --check ./src/classify.js && node --check ./src/diff.js && node --check ./src/doctor.js && node --check ./src/plan.js && node --check ./src/surfaces.js"
+    "check": "node --check ./bin/agent-sync.js && node --check ./src/classify.js && node --check ./src/diff.js && node --check ./src/doctor.js && node --check ./src/plan.js && node --check ./src/surfaces.js",
+    "rs:check": "cargo check --workspace",
+    "rs:test": "cargo test --workspace",
+    "rs:scan": "cargo run -p agent_sync_cli -- scan",
+    "desktop:dev": "pnpm --dir apps/desktop tauri:dev",
+    "desktop:build": "pnpm --dir apps/desktop tauri:build",
+    "desktop:web:build": "pnpm --dir apps/desktop build"
   },
   "engines": {
     "node": ">=20"

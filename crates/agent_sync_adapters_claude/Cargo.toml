@@ -1,0 +1,10 @@
+[package]
+name = "agent_sync_adapters_claude"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+agent_sync_core = { path = "../agent_sync_core" }
+agent_sync_scan = { path = "../agent_sync_scan" }
+serde.workspace = true

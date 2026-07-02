@@ -1,37 +1,77 @@
-# agent-sync
+# Agent Sync Studio
 
-`agent-sync` is a small read-only diagnostic tool for AI coding agent setup drift across machines.
+`agent-sync` is becoming a Tauri-first cross-platform visual sync tool for AI coding agent state. The product target is not raw file copying; it is a safe migration loop for the working context behind Codex and Claude Code.
 
-It now supports a safe three-step loop:
-
-1. `doctor`: scan common Codex, Claude Code, Cursor, Windsurf/Devin, Continue, Aider, and GitHub Copilot state surfaces.
-2. `diff`: compare two snapshot manifests.
-3. `plan`: generate a migration recipe that separates safe candidates, review-required items, and blocked-by-default surfaces.
-
-## Quick start
-
-```bash
-node ./bin/agent-sync.js doctor
-node ./bin/agent-sync.js doctor --json --output snapshot.json
-node ./bin/agent-sync.js diff --from mac.json --to windows.json
-node ./bin/agent-sync.js plan --from mac.json --to windows.json --target windows
+```text
+Scan -> Select -> Transform -> Preview -> Apply -> Verify/Rollback
 ```
 
-Useful test overrides:
+## Current architecture
+
+- `apps/desktop`: Tauri 2 + React/Vite desktop control plane with native bundle/project/backup path pickers.
+- `crates/agent_sync_core`: domain models, safety classes, path redaction/classification.
+- `crates/agent_sync_scan`: Rust scanner for Codex and Claude Code surfaces.
+- `crates/agent_sync_transform`: snapshot diff, project-mapping suggestions, and transform-plan generation.
+- `crates/agent_sync_bundle`: `.asbundle` source snapshot, manifest, payload, checksum, and redaction handling.
+- `crates/agent_sync_apply`: preflight, operation journal, safe payload apply, backup, and checksum verification.
+- `crates/agent_sync_adapters_codex`: Codex adapter capability and session metadata entry points.
+- `crates/agent_sync_adapters_claude`: Claude Code adapter capability and session metadata entry points.
+- `crates/agent_sync_cli`: Rust CLI that uses the same core as the desktop app.
+
+The older Node CLI remains available as a legacy reference while the Rust/Tauri product line takes over.
+
+## What works now
+
+- Scan local Codex and Claude Code surfaces without printing file contents.
+- Export a verified `.asbundle` containing the source snapshot, safe text payloads, and metadata-only session archive entries.
+- Import and verify a remote `.asbundle` in the desktop UI.
+- Create a remote-to-local transform plan.
+- Show project mapping confidence by normalized git remote, directory basename, or manual fallback.
+- Select auto-safe operations visually.
+- Choose remote Codex/Claude session archives and import them into the local Agent Sync Studio archive store with target-project mapping.
+- Apply selected safe payloads with backups and checksum verification.
+- Persist snapshots in a local SQLite record store.
+
+## Commands
 
 ```bash
-node ./bin/agent-sync.js doctor --home /tmp/fake-home --project /tmp/repo --json
+# Rust core
+cargo test --workspace
+cargo run -p agent_sync_cli -- scan
+cargo run -p agent_sync_cli -- bundle-manifest
+cargo run -p agent_sync_cli -- export-bundle --output agent-sync-local.asbundle
+cargo run -p agent_sync_cli -- verify-bundle --input agent-sync-local.asbundle
+cargo run -p agent_sync_cli -- self-plan
+
+# Desktop frontend and app
+pnpm install
+pnpm --dir apps/desktop build
+pnpm --dir apps/desktop tauri build --no-bundle
+pnpm --dir apps/desktop tauri:dev
+
+# Legacy Node reference
+npm run check && npm test
 ```
 
-## Safety
+## Safety policy
 
-This prototype is inventory and recipe only. It does not migrate, copy, parse, or print file contents. It reports metadata and safety classifications only.
-
-Blocked by default:
+Blocked by product policy:
 
 - credentials, tokens, cookies, OAuth state, `.env`-like files
-- raw chat/session/transcript stores
-- SQLite/LevelDB-like state
-- binary/cache/plugin artifacts
+- direct live patching of Codex/Claude databases while the app is running
+- binary/cache/plugin artifacts without adapter support
+- apply operations without backup and verification journal entries
 
-See `docs/mvp0-design.md` for the product boundary.
+Review-required by default:
+
+- raw chat/session/transcript stores
+- MCP configs
+- hooks/scripts/commands
+- memory/rules/skills/prompts/agents
+
+Automatically applicable today:
+
+- safe text config payloads from a verified bundle, only through selected operations, with backup and checksum verification.
+- metadata-only session archive records into Agent Sync Studio SQLite storage. This does not rewrite native Codex/Claude session databases.
+
+See `.omx/plans/agent-sync-studio-full-architecture-20260701.md` and `docs/agent-sync-studio-architecture.md` for the full implementation architecture.

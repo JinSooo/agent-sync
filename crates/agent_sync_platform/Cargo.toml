@@ -1,0 +1,8 @@
+[package]
+name = "agent_sync_platform"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
