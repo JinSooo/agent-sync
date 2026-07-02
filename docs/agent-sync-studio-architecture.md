@@ -64,7 +64,7 @@ Implemented:
 - Local SQLite store for snapshots, apply journals, native session import journals, and session archive records as JSON records.
 - Safe config plus acknowledged memory/MCP review apply path with visual operation selection, backup, operation journal, checksum verification, automatic journal persistence, history loading, and journal rollback.
 - Session Library flow: choose export-capable local sessions for raw payload export; choose remote Codex/Claude session archives, bind them to the target home/project path, import metadata-only records into local Agent Sync Studio SQLite storage, check native import readiness without writing files, stage selected raw payloads into an isolated native-import directory, or write selected payloads to native Codex/Claude session-file locations with project-path rewrite evidence, a stopped-agent preflight, native import-journal persistence/history loading, and native-file rollback. Session native actions are gated by adapter capabilities and warn when DB/index remap is not supported.
-- Rust CLI: `scan`, `bundle-manifest`, `export-bundle`, `verify-bundle`, `import-native-sessions`, `rollback-journal`, `rollback-native-session-journal`, `self-plan`; `import-native-sessions` defaults to the stopped-agent check and exposes `--skip-agent-stopped-check` for explicit override.
+- Rust CLI: `scan`, `bundle-manifest`, `export-bundle`, `verify-bundle`, `check-native-sessions`, `import-native-sessions`, `rollback-journal`, `rollback-native-session-journal`, `self-plan`; `check-native-sessions` is read-only and `import-native-sessions` defaults to the stopped-agent check with `--skip-agent-stopped-check` for explicit override.
 
 Implemented in the current product loop:
 

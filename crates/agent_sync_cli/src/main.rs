@@ -1,7 +1,8 @@
 use agent_sync_apply::{
     OperationJournal, SessionNativeFileImportJournal, SessionNativeFileImportOptions,
-    create_journal, import_session_payloads_to_native_files, preflight, rollback_journal,
-    rollback_session_native_file_import_journal,
+    SessionNativeImportReadinessOptions, create_journal, import_session_payloads_to_native_files,
+    preflight, rollback_journal, rollback_session_native_file_import_journal,
+    session_native_import_readiness,
 };
 use agent_sync_bundle::{
     BundleExportOptions, PayloadSelectionRef, export_bundle, manifest_from_snapshot,
@@ -66,6 +67,28 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
+        "check-native-sessions" => {
+            let input =
+                value_after(&args, "--input").unwrap_or_else(|| "agent-sync.asbundle".to_string());
+            let bundle = read_bundle_file(input)?;
+            let selected_session_ids = selected_session_ids_or_all(&bundle, &args);
+            let target_snapshot = if args.iter().any(|arg| arg == "--no-target-scan") {
+                None
+            } else {
+                Some(scan_device(default_scan_options(&args))?)
+            };
+            let report = session_native_import_readiness(
+                &bundle,
+                target_snapshot.as_ref(),
+                &SessionNativeImportReadinessOptions {
+                    selected_session_ids,
+                    require_agents_stopped: !args
+                        .iter()
+                        .any(|arg| arg == "--skip-agent-stopped-check"),
+                },
+            );
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         "import-native-sessions" => {
             let input =
                 value_after(&args, "--input").unwrap_or_else(|| "agent-sync.asbundle".to_string());
@@ -124,7 +147,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|import-native-sessions|rollback-journal|rollback-native-session-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check]"
+                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|check-native-sessions|import-native-sessions|rollback-journal|rollback-native-session-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
             );
             std::process::exit(2);
         }
@@ -189,6 +212,22 @@ fn values_after(args: &[String], flag: &str) -> Vec<String> {
         }
     }
     values
+}
+
+fn selected_session_ids_or_all(
+    bundle: &agent_sync_bundle::SyncBundle,
+    args: &[String],
+) -> Vec<String> {
+    let selected = values_after(args, "--session");
+    if selected.is_empty() {
+        bundle
+            .session_archives
+            .iter()
+            .map(|archive| archive.session.id.clone())
+            .collect()
+    } else {
+        selected
+    }
 }
 
 fn payload_selection_values(args: &[String], flag: &str) -> Vec<PayloadSelectionRef> {
