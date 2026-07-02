@@ -253,6 +253,8 @@ type SessionArchiveImportJournal = {
   }>;
 };
 
+type SessionArchiveImportRecord = SessionArchiveImportJournal['records'][number];
+
 type SessionNativeImportStageJournal = {
   id: string;
   status: string;
@@ -481,6 +483,7 @@ export function App() {
   const [nativeRemapDryRunSelectionKey, setNativeRemapDryRunSelectionKey] = useState('');
   const [nativeRemapJournal, setNativeRemapJournal] = useState<NativeSessionProjectRemapJournal | null>(null);
   const [snapshotHistory, setSnapshotHistory] = useState<StoredRecord[]>([]);
+  const [sessionArchiveHistory, setSessionArchiveHistory] = useState<StoredRecord[]>([]);
   const [journalHistory, setJournalHistory] = useState<StoredRecord[]>([]);
   const [sessionNativeFileJournalHistory, setSessionNativeFileJournalHistory] = useState<StoredRecord[]>([]);
   const [nativeRemapJournalHistory, setNativeRemapJournalHistory] = useState<StoredRecord[]>([]);
@@ -728,6 +731,7 @@ export function App() {
         targetProjectBySession
       });
       setSessionArchiveJournal(nextJournal);
+      await refreshSessionArchiveHistory();
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1011,6 +1015,18 @@ export function App() {
       setSnapshotHistory(rows);
     } catch (err) {
       setError(`Failed to load snapshot history: ${String(err)}`);
+    }
+  }
+
+  async function refreshSessionArchiveHistory() {
+    try {
+      const rows = await invoke<StoredRecord[]>('list_store_records', {
+        dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
+        kind: 'session_archive'
+      });
+      setSessionArchiveHistory(rows);
+    } catch (err) {
+      setError(`Failed to load session archive history: ${String(err)}`);
     }
   }
 
@@ -1644,6 +1660,29 @@ export function App() {
           <Metric label="Platform" value={snapshot ? `${snapshot.platform.os}/${snapshot.platform.arch}` : '—'} />
         </section>
 
+        <section className="panel">
+          <div className="panelTitle">
+            <h2>Session archive history</h2>
+            <span>{sessionArchiveHistory.length} stored metadata record(s) in {archiveStorePath || 'agent-sync-studio.sqlite'}</span>
+          </div>
+          {sessionArchiveHistory.length ? (
+            <ul className="operationList">
+              {sessionArchiveHistory.slice(0, 40).map((record) => {
+                const summary = storedSessionArchiveSummary(record);
+                return (
+                  <li key={record.id}>
+                    {summary.agentName} · {summary.title} · payload {summary.payloadIncluded ? 'included in source bundle' : 'metadata only'}
+                    <small>source {summary.sourceProject} → target {summary.targetProject}</small>
+                    <small>{summary.sessionId} · updated {record.updated_at} · {summary.note}</small>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="empty">Imported session archive metadata is persisted here. Refresh after restart to review what was archived; raw payload recovery still requires the original encrypted bundle or native import journal.</p>
+          )}
+        </section>
+
         <section className="grid two">
           <section className="panel">
             <div className="panelTitle">
@@ -1671,6 +1710,7 @@ export function App() {
                 <input value={archiveStorePath} onChange={(event) => setArchiveStorePath(event.target.value)} placeholder="agent-sync-studio.sqlite" />
               </label>
               <button className="secondary" onClick={refreshSnapshotHistory} disabled={busy}>Refresh snapshots</button>
+              <button className="secondary" onClick={refreshSessionArchiveHistory} disabled={busy}>Refresh session archives</button>
               <button className="secondary" onClick={refreshJournalHistory} disabled={busy}>Refresh apply journals</button>
               <button className="secondary" onClick={refreshSessionNativeFileJournalHistory} disabled={busy}>Refresh native import journals</button>
               <button className="secondary" onClick={refreshNativeRemapJournalHistory} disabled={busy}>Refresh DB remap journals</button>
@@ -2625,6 +2665,39 @@ function storedSnapshotSummary(record: StoredRecord): { platform: string; agents
       detectedAgents: 0,
       findings: 0,
       project: 'Unable to parse stored snapshot'
+    };
+  }
+}
+
+function storedSessionArchiveSummary(record: StoredRecord): {
+  agentName: string;
+  sessionId: string;
+  title: string;
+  sourceProject: string;
+  targetProject: string;
+  payloadIncluded: boolean;
+  note: string;
+} {
+  try {
+    const archive = JSON.parse(record.json) as SessionArchiveImportRecord;
+    return {
+      agentName: archive.agent_name || archive.agent_id || 'unknown agent',
+      sessionId: archive.session_id || record.id,
+      title: archive.title || archive.session_id || record.id,
+      sourceProject: archive.source_project || 'unknown',
+      targetProject: archive.target_project || 'not mapped',
+      payloadIncluded: Boolean(archive.payload_included),
+      note: archive.note || 'No archive note'
+    };
+  } catch {
+    return {
+      agentName: 'invalid_json',
+      sessionId: record.id,
+      title: record.id,
+      sourceProject: 'unknown',
+      targetProject: 'unknown',
+      payloadIncluded: false,
+      note: 'Unable to parse stored session archive'
     };
   }
 }

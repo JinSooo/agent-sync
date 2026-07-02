@@ -36,6 +36,7 @@ The older Node CLI remains available as a legacy reference while the Rust/Tauri 
 - Choose memory/rules/prompts and MCP config payloads for explicit review export, then apply selected review payloads only after an acknowledgement gate.
 - Search/filter local Codex/Claude sessions and memory/MCP payloads, then choose exactly which raw session payloads or review-required payloads should be included in the next bundle; raw session selection remains gated by adapter export capability.
 - Search/filter remote Codex/Claude session archives and import selected archives into the local Agent Sync Studio archive store with global or per-session target-project mapping; native-file actions are gated by adapter import capability.
+- Refresh persisted session archive history from the local SQLite store after app restart to review imported archive metadata; raw payload recovery still requires the original encrypted bundle or native import journal.
 - Stage selected raw session payloads into an isolated native-import directory with optional source-project to target-project path rewriting; per-session target-project overrides win over the global target path.
 - Check native session import readiness before writing, including raw-payload presence, adapter capability, stopped-agent preflight posture, rollback limits, and DB/index remap gaps.
 - Discover native Codex/Claude DB/index store candidates in read-only mode, including SQLite table/column schema summaries without row contents.
@@ -126,6 +127,7 @@ Automatically applicable today:
 - local scan snapshot persistence into the local SQLite store, with UI history loading so a saved scan can be restored after restart.
 - automatic apply-journal, native session import-journal, and native DB remap-journal persistence into the local SQLite store, with UI loading of stored rollback points.
 - metadata-only session archive records into Agent Sync Studio SQLite storage, including per-session target-project metadata when the user overrides the global target.
+- session archive history browsing in desktop from persisted `session_archive` records; these records are metadata/audit entries and do not replace the original raw-payload bundle.
 - selected raw session payloads into an isolated staging directory with project-path rewrite journal; per-session target overrides are recorded in the stage journal.
 - native session import readiness reports in desktop and CLI that are read-only and explicitly warn when the current adapter supports native-file import but not Codex/Claude DB/index project remap.
 - read-only native session store discovery in desktop and CLI, including SQLite schema metadata only; this is evidence gathering for future DB/index remap and does not write native stores.
