@@ -14,9 +14,11 @@ use agent_sync_bundle::{
     BundleFileDecryptionOptions, BundleFileEncryptionOptions, BundleRecipientProfile,
     DEFAULT_BUNDLE_KEYRING_ACCOUNT, PayloadSelectionRef, bundle_recipient_from_input,
     bundle_recipient_profile_from_input, delete_bundle_device_key_keyring, export_bundle,
-    generate_bundle_device_key_file, generate_bundle_device_key_keyring, manifest_from_snapshot,
-    read_bundle_device_key_file, read_bundle_device_key_keyring, read_bundle_file_with_decryption,
-    verify_bundle, write_bundle_file_with_encryption, write_bundle_recipient_file,
+    export_bundle_device_key_keyring_backup, generate_bundle_device_key_file,
+    generate_bundle_device_key_keyring, manifest_from_snapshot, read_bundle_device_key_file,
+    read_bundle_device_key_keyring, read_bundle_file_with_decryption,
+    restore_bundle_device_key_keyring_backup, verify_bundle, write_bundle_file_with_encryption,
+    write_bundle_recipient_file,
 };
 use agent_sync_scan::{ScanOptions, scan_device};
 use agent_sync_storage::AgentSyncStore;
@@ -88,6 +90,22 @@ fn main() -> anyhow::Result<()> {
                     "account": account
                 })
             );
+        }
+        "export-bundle-keychain-backup" => {
+            let account = bundle_keychain_account_or_default(&args);
+            let output = value_after(&args, "--output")
+                .unwrap_or_else(|| "agent-sync-keychain-backup.age".to_string());
+            let passphrase = backup_passphrase(&args)?;
+            let summary = export_bundle_device_key_keyring_backup(&account, output, &passphrase)?;
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+        }
+        "restore-bundle-keychain-backup" => {
+            let account = bundle_keychain_account_or_default(&args);
+            let input = value_after(&args, "--input")
+                .unwrap_or_else(|| "agent-sync-keychain-backup.age".to_string());
+            let passphrase = backup_passphrase(&args)?;
+            let summary = restore_bundle_device_key_keyring_backup(&account, input, &passphrase)?;
+            println!("{}", serde_json::to_string_pretty(&summary)?);
         }
         "save-bundle-recipient-profile" => {
             let store = AgentSyncStore::open(store_path(&args))?;
@@ -326,7 +344,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|generate-bundle-keychain|export-bundle-recipient|export-bundle-keychain-recipient|forget-bundle-keychain|save-bundle-recipient-profile|list-bundle-recipient-profiles|forget-bundle-recipient-profile|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|dry-run-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--store PATH] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH|--bundle-keychain ACCOUNT|--bundle-recipient AGE_OR_JSON|--bundle-recipient-profile PROFILE_ID --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --session-target SESSION_ID=PROJECT_PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
+                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|generate-bundle-keychain|export-bundle-recipient|export-bundle-keychain-recipient|forget-bundle-keychain|export-bundle-keychain-backup|restore-bundle-keychain-backup|save-bundle-recipient-profile|list-bundle-recipient-profiles|forget-bundle-recipient-profile|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|dry-run-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--store PATH] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH|--bundle-keychain ACCOUNT|--bundle-recipient AGE_OR_JSON|--bundle-recipient-profile PROFILE_ID --allow-unencrypted-sensitive-payloads] [--backup-passphrase PASSPHRASE] [--target-home PATH --target-project PATH --session-target SESSION_ID=PROJECT_PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
             );
             std::process::exit(2);
         }
@@ -430,6 +448,17 @@ fn bundle_keychain_account(args: &[String]) -> Option<String> {
 
 fn bundle_keychain_account_or_default(args: &[String]) -> String {
     bundle_keychain_account(args).unwrap_or_else(|| DEFAULT_BUNDLE_KEYRING_ACCOUNT.to_string())
+}
+
+fn backup_passphrase(args: &[String]) -> anyhow::Result<String> {
+    value_after(args, "--backup-passphrase")
+        .or_else(|| env::var("AGENT_SYNC_BUNDLE_BACKUP_PASSPHRASE").ok())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--backup-passphrase or AGENT_SYNC_BUNDLE_BACKUP_PASSPHRASE is required"
+            )
+        })
 }
 
 fn bundle_file_encryption_options(args: &[String]) -> anyhow::Result<BundleFileEncryptionOptions> {

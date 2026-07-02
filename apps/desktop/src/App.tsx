@@ -434,6 +434,8 @@ export function App() {
   const [bundlePassphrase, setBundlePassphrase] = useState('');
   const [bundleKeyPath, setBundleKeyPath] = useState('');
   const [bundleKeychainAccount, setBundleKeychainAccount] = useState('');
+  const [bundleKeychainBackupPath, setBundleKeychainBackupPath] = useState('agent-sync-keychain-backup.age');
+  const [bundleKeychainBackupPassphrase, setBundleKeychainBackupPassphrase] = useState('');
   const [bundleRecipientInputs, setBundleRecipientInputs] = useState('');
   const [recipientProfiles, setRecipientProfiles] = useState<BundleRecipientProfile[]>([]);
   const [selectedRecipientProfileIds, setSelectedRecipientProfileIds] = useState<string[]>([]);
@@ -995,6 +997,23 @@ export function App() {
     }
   }
 
+  async function chooseBundleKeychainBackupOutput() {
+    const selected = await save({
+      defaultPath: bundleKeychainBackupPath || 'agent-sync-keychain-backup.age',
+      filters: [{ name: 'Agent Sync Keychain Backup', extensions: ['age'] }]
+    });
+    if (selected) setBundleKeychainBackupPath(selected);
+  }
+
+  async function chooseBundleKeychainBackupInput() {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: 'Agent Sync Keychain Backup', extensions: ['age'] }]
+    });
+    const path = singlePath(selected);
+    if (path) setBundleKeychainBackupPath(path);
+  }
+
   async function generateBundleKey() {
     const selected = await save({
       defaultPath: bundleKeyPath || 'agent-sync-device-key.json',
@@ -1087,6 +1106,58 @@ export function App() {
     try {
       await invoke<void>('forget_bundle_key_keyring', { account });
       setStoreMessage(`OS keychain bundle key removed: ${account}`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportBundleKeychainBackup() {
+    const account = bundleKeychainAccount.trim();
+    if (!account) {
+      setError('Enter an OS keychain account before exporting an encrypted backup.');
+      return;
+    }
+    if (!bundleKeychainBackupPassphrase) {
+      setError('Enter a backup passphrase; this encrypts the private key backup file.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const key = await invoke<BundleDeviceKeySummary>('export_bundle_keychain_backup', {
+        account,
+        output: bundleKeychainBackupPath || 'agent-sync-keychain-backup.age',
+        backupPassphrase: bundleKeychainBackupPassphrase
+      });
+      setStoreMessage(`encrypted keychain backup exported: ${key.id}`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function restoreBundleKeychainBackup() {
+    const account = bundleKeychainAccount.trim();
+    if (!account) {
+      setError('Enter the OS keychain account where the backup should be restored.');
+      return;
+    }
+    if (!bundleKeychainBackupPassphrase) {
+      setError('Enter the backup passphrase to decrypt the private key backup file.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const key = await invoke<BundleDeviceKeySummary>('restore_bundle_keychain_backup', {
+        account,
+        input: bundleKeychainBackupPath || 'agent-sync-keychain-backup.age',
+        backupPassphrase: bundleKeychainBackupPassphrase
+      });
+      setStoreMessage(`keychain backup restored into OS keychain: ${key.id}`);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1434,6 +1505,21 @@ export function App() {
                 <button className="secondary" onClick={exportBundleKeychainRecipient} disabled={busy || !bundleKeychainAccount.trim()}>Export keychain public recipient…</button>
                 <button className="secondary dangerButton" onClick={forgetBundleKeychain} disabled={busy || !bundleKeychainAccount.trim()}>Forget keychain key</button>
               </div>
+              <label>
+                Encrypted keychain backup path
+                <input value={bundleKeychainBackupPath} onChange={(event) => setBundleKeychainBackupPath(event.target.value)} placeholder="agent-sync-keychain-backup.age" />
+              </label>
+              <label>
+                Keychain backup passphrase
+                <input type="password" value={bundleKeychainBackupPassphrase} onChange={(event) => setBundleKeychainBackupPassphrase(event.target.value)} placeholder="encrypt/decrypt private key backup" />
+              </label>
+              <div className="chips">
+                <button className="secondary" onClick={chooseBundleKeychainBackupOutput} disabled={busy}>Choose backup output…</button>
+                <button className="secondary" onClick={chooseBundleKeychainBackupInput} disabled={busy}>Choose backup input…</button>
+                <button className="secondary" onClick={exportBundleKeychainBackup} disabled={busy || !bundleKeychainAccount.trim() || !bundleKeychainBackupPassphrase}>Export encrypted keychain backup</button>
+                <button className="secondary" onClick={restoreBundleKeychainBackup} disabled={busy || !bundleKeychainAccount.trim() || !bundleKeychainBackupPassphrase}>Restore backup to keychain</button>
+              </div>
+              <p className="notice">Backup files are encrypted with this backup passphrase and contain the private age identity; store the file separately from the passphrase.</p>
               <label>
                 Additional public recipients
                 <textarea value={bundleRecipientInputs} onChange={(event) => setBundleRecipientInputs(event.target.value)} placeholder="one age1... recipient or agent-sync-recipient.json path per line" />

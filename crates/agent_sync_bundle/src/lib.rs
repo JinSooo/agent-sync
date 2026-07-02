@@ -115,6 +115,13 @@ pub struct BundleRecipientProfile {
     pub revoked: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct BundleDeviceKeyBackupPayload {
+    schema_version: String,
+    backed_up_at: DateTime<Utc>,
+    key: BundleDeviceKey,
+}
+
 impl From<&BundleDeviceKey> for BundleDeviceKeySummary {
     fn from(key: &BundleDeviceKey) -> Self {
         Self {
@@ -527,6 +534,73 @@ pub fn delete_bundle_device_key_keyring(account: impl AsRef<str>) -> std::io::Re
         .map_err(keyring_error)
 }
 
+pub fn write_bundle_device_key_backup_file(
+    key: &BundleDeviceKey,
+    path: impl AsRef<Path>,
+    passphrase: &str,
+) -> std::io::Result<BundleDeviceKeySummary> {
+    let passphrase = normalized_passphrase(Some(passphrase)).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "backup passphrase is required for encrypted device-key backup",
+        )
+    })?;
+    parse_age_recipient(&key.age_recipient)?;
+    parse_age_identity(&key.age_identity)?;
+    let payload = BundleDeviceKeyBackupPayload {
+        schema_version: "agent-sync-device-key-backup/v1".to_string(),
+        backed_up_at: Utc::now(),
+        key: key.clone(),
+    };
+    let json = serde_json::to_vec_pretty(&payload).map_err(std::io::Error::other)?;
+    let encrypted = encrypt_bundle_bytes(&json, passphrase)?;
+    fs::write(path, encrypted)?;
+    Ok(BundleDeviceKeySummary::from(key))
+}
+
+pub fn read_bundle_device_key_backup_file(
+    path: impl AsRef<Path>,
+    passphrase: &str,
+) -> std::io::Result<BundleDeviceKey> {
+    let passphrase = normalized_passphrase(Some(passphrase)).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "backup passphrase is required to restore encrypted device-key backup",
+        )
+    })?;
+    let bytes = fs::read(path)?;
+    let plaintext = decrypt_bundle_bytes(&bytes, passphrase)?;
+    let payload: BundleDeviceKeyBackupPayload =
+        serde_json::from_slice(&plaintext).map_err(std::io::Error::other)?;
+    if payload.schema_version != "agent-sync-device-key-backup/v1" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unsupported device-key backup schema version",
+        ));
+    }
+    parse_age_recipient(&payload.key.age_recipient)?;
+    parse_age_identity(&payload.key.age_identity)?;
+    Ok(payload.key)
+}
+
+pub fn export_bundle_device_key_keyring_backup(
+    account: impl AsRef<str>,
+    path: impl AsRef<Path>,
+    passphrase: &str,
+) -> std::io::Result<BundleDeviceKeySummary> {
+    let key = read_bundle_device_key_keyring(account)?;
+    write_bundle_device_key_backup_file(&key, path, passphrase)
+}
+
+pub fn restore_bundle_device_key_keyring_backup(
+    account: impl AsRef<str>,
+    path: impl AsRef<Path>,
+    passphrase: &str,
+) -> std::io::Result<BundleDeviceKeySummary> {
+    let key = read_bundle_device_key_backup_file(path, passphrase)?;
+    write_bundle_device_key_keyring(account, &key)
+}
+
 pub fn write_bundle_recipient_file(
     recipient: &BundleDeviceKeySummary,
     path: impl AsRef<Path>,
@@ -823,6 +897,28 @@ mod tests {
             "work-laptop"
         );
         assert!(normalized_keyring_account("   ").is_err());
+    }
+
+    #[test]
+    fn encrypts_device_key_backup_and_restores_with_passphrase() {
+        let root = std::env::temp_dir().join(format!("agent-sync-key-backup-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let backup_path = root.join("device-key-backup.age");
+        let key = generate_bundle_device_key();
+
+        let summary =
+            write_bundle_device_key_backup_file(&key, &backup_path, "backup passphrase").unwrap();
+        assert_eq!(summary.age_recipient, key.age_recipient);
+
+        let bytes = fs::read(&backup_path).unwrap();
+        assert!(!bytes.starts_with(b"{"));
+        assert!(!String::from_utf8_lossy(&bytes).contains(&key.age_identity));
+        assert!(read_bundle_device_key_backup_file(&backup_path, "wrong passphrase").is_err());
+
+        let restored =
+            read_bundle_device_key_backup_file(&backup_path, "backup passphrase").unwrap();
+        assert_eq!(restored, key);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

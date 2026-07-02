@@ -20,9 +20,11 @@ use agent_sync_bundle::{
     BundleFileDecryptionOptions, BundleFileEncryptionOptions, BundleRecipientProfile,
     PayloadSelectionRef, SyncBundle, SyncBundleManifest, bundle_recipient_from_input,
     bundle_recipient_profile_from_input, delete_bundle_device_key_keyring, export_bundle,
-    generate_bundle_device_key_file, generate_bundle_device_key_keyring, manifest_from_snapshot,
-    read_bundle_device_key_file, read_bundle_device_key_keyring, read_bundle_file_with_decryption,
-    verify_bundle, write_bundle_file_with_encryption, write_bundle_recipient_file,
+    export_bundle_device_key_keyring_backup, generate_bundle_device_key_file,
+    generate_bundle_device_key_keyring, manifest_from_snapshot, read_bundle_device_key_file,
+    read_bundle_device_key_keyring, read_bundle_file_with_decryption,
+    restore_bundle_device_key_keyring_backup, verify_bundle, write_bundle_file_with_encryption,
+    write_bundle_recipient_file,
 };
 use agent_sync_core::DeviceSnapshot;
 use agent_sync_scan::{ScanOptions, scan_device as scan_device_core};
@@ -93,6 +95,26 @@ fn generate_bundle_key_keyring(account: String) -> Result<BundleDeviceKeySummary
 #[tauri::command]
 fn forget_bundle_key_keyring(account: String) -> Result<(), String> {
     delete_bundle_device_key_keyring(account).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn export_bundle_keychain_backup(
+    account: String,
+    output: String,
+    backup_passphrase: String,
+) -> Result<BundleDeviceKeySummary, String> {
+    export_bundle_device_key_keyring_backup(account, output, &backup_passphrase)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn restore_bundle_keychain_backup(
+    account: String,
+    input: String,
+    backup_passphrase: String,
+) -> Result<BundleDeviceKeySummary, String> {
+    restore_bundle_device_key_keyring_backup(account, input, &backup_passphrase)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -637,6 +659,8 @@ pub fn run() {
             generate_bundle_key_file,
             generate_bundle_key_keyring,
             forget_bundle_key_keyring,
+            export_bundle_keychain_backup,
+            restore_bundle_keychain_backup,
             export_bundle_recipient_file,
             export_bundle_recipient_keyring,
             export_bundle_file,
