@@ -15,9 +15,11 @@ use agent_sync_apply::{
     stage_session_native_import,
 };
 use agent_sync_bundle::{
-    BundleExportOptions, PayloadSelectionRef, SyncBundle, SyncBundleManifest, export_bundle,
-    manifest_from_snapshot, read_bundle_file_with_passphrase, verify_bundle,
-    write_bundle_file_with_passphrase,
+    BundleDeviceKeySummary, BundleExportOptions, BundleFileDecryptionOptions,
+    BundleFileEncryptionOptions, PayloadSelectionRef, SyncBundle, SyncBundleManifest,
+    export_bundle, generate_bundle_device_key_file, manifest_from_snapshot,
+    read_bundle_device_key_file, read_bundle_file_with_decryption, verify_bundle,
+    write_bundle_file_with_encryption,
 };
 use agent_sync_core::DeviceSnapshot;
 use agent_sync_scan::{ScanOptions, scan_device as scan_device_core};
@@ -73,6 +75,13 @@ fn create_bundle_manifest(snapshot: DeviceSnapshot) -> Result<SyncBundleManifest
 }
 
 #[tauri::command]
+fn generate_bundle_key_file(output: String) -> Result<BundleDeviceKeySummary, String> {
+    generate_bundle_device_key_file(output)
+        .map(|key| BundleDeviceKeySummary::from(&key))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn export_bundle_file(
     snapshot: DeviceSnapshot,
     home: Option<String>,
@@ -85,6 +94,7 @@ fn export_bundle_file(
     max_session_payload_bytes: Option<u64>,
     allow_unencrypted_sensitive_payloads: Option<bool>,
     encryption_passphrase: Option<String>,
+    encryption_key_path: Option<String>,
 ) -> Result<SyncBundleManifest, String> {
     let home = home
         .map(PathBuf::from)
@@ -94,6 +104,7 @@ fn export_bundle_file(
         Some(project) => PathBuf::from(project),
         None => std::env::current_dir().map_err(|error| error.to_string())?,
     };
+    let encryption = bundle_file_encryption_options(encryption_passphrase, encryption_key_path)?;
     let bundle = export_bundle(
         &snapshot,
         &BundleExportOptions {
@@ -106,21 +117,24 @@ fn export_bundle_file(
             max_session_payload_bytes: max_session_payload_bytes.unwrap_or(2 * 1024 * 1024),
             allow_unencrypted_sensitive_payloads: allow_unencrypted_sensitive_payloads
                 .unwrap_or(false),
-            encryption_passphrase: encryption_passphrase
-                .clone()
-                .filter(|value| !value.is_empty()),
+            encryption_passphrase: encryption.passphrase.clone(),
+            encryption_recipient: encryption.recipient.clone(),
         },
     )
     .map_err(|error| error.to_string())?;
-    write_bundle_file_with_passphrase(&bundle, output, encryption_passphrase.as_deref())
+    write_bundle_file_with_encryption(&bundle, output, &encryption)
         .map_err(|error| error.to_string())?;
     Ok(bundle.manifest)
 }
 
 #[tauri::command]
-fn read_bundle(path: String, encryption_passphrase: Option<String>) -> Result<SyncBundle, String> {
-    read_bundle_file_with_passphrase(path, encryption_passphrase.as_deref())
-        .map_err(|error| error.to_string())
+fn read_bundle(
+    path: String,
+    encryption_passphrase: Option<String>,
+    encryption_key_path: Option<String>,
+) -> Result<SyncBundle, String> {
+    let decryption = bundle_file_decryption_options(encryption_passphrase, encryption_key_path)?;
+    read_bundle_file_with_decryption(path, &decryption).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -410,6 +424,46 @@ fn list_store_records(db_path: String, kind: String) -> Result<Vec<StoredRecord>
     store.list(&kind).map_err(|error| error.to_string())
 }
 
+fn nonempty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
+}
+
+fn bundle_file_encryption_options(
+    passphrase: Option<String>,
+    key_path: Option<String>,
+) -> Result<BundleFileEncryptionOptions, String> {
+    let passphrase = nonempty(passphrase);
+    let key = nonempty(key_path)
+        .map(read_bundle_device_key_file)
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    if passphrase.is_some() && key.is_some() {
+        return Err("Bundle passphrase and bundle key file are mutually exclusive".to_string());
+    }
+    Ok(BundleFileEncryptionOptions {
+        passphrase,
+        recipient: key.map(|key| key.age_recipient),
+    })
+}
+
+fn bundle_file_decryption_options(
+    passphrase: Option<String>,
+    key_path: Option<String>,
+) -> Result<BundleFileDecryptionOptions, String> {
+    let passphrase = nonempty(passphrase);
+    let key = nonempty(key_path)
+        .map(read_bundle_device_key_file)
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    if passphrase.is_some() && key.is_some() {
+        return Err("Bundle passphrase and bundle key file are mutually exclusive".to_string());
+    }
+    Ok(BundleFileDecryptionOptions {
+        passphrase,
+        identities: key.map(|key| vec![key.age_identity]).unwrap_or_default(),
+    })
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -418,6 +472,7 @@ pub fn run() {
             diff_snapshots_command,
             create_transform_plan_command,
             create_bundle_manifest,
+            generate_bundle_key_file,
             export_bundle_file,
             read_bundle,
             verify_bundle_command,

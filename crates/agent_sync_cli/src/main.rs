@@ -9,8 +9,10 @@ use agent_sync_apply::{
     rollback_session_native_file_import_journal, session_native_import_readiness,
 };
 use agent_sync_bundle::{
-    BundleExportOptions, PayloadSelectionRef, export_bundle, manifest_from_snapshot,
-    read_bundle_file_with_passphrase, verify_bundle, write_bundle_file_with_passphrase,
+    BundleDeviceKeySummary, BundleExportOptions, BundleFileDecryptionOptions,
+    BundleFileEncryptionOptions, PayloadSelectionRef, export_bundle,
+    generate_bundle_device_key_file, manifest_from_snapshot, read_bundle_device_key_file,
+    read_bundle_file_with_decryption, verify_bundle, write_bundle_file_with_encryption,
 };
 use agent_sync_scan::{ScanOptions, scan_device};
 use agent_sync_transform::create_transform_plan;
@@ -37,10 +39,19 @@ fn main() -> anyhow::Result<()> {
                 serde_json::to_string_pretty(&manifest_from_snapshot(&snapshot))?
             );
         }
+        "generate-bundle-key" => {
+            let output = value_after(&args, "--output")
+                .unwrap_or_else(|| "agent-sync-device-key.json".to_string());
+            let key = generate_bundle_device_key_file(&output)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&BundleDeviceKeySummary::from(&key))?
+            );
+        }
         "export-bundle" => {
             let output =
                 value_after(&args, "--output").unwrap_or_else(|| "agent-sync.asbundle".to_string());
-            let passphrase = bundle_passphrase(&args);
+            let encryption = bundle_file_encryption_options(&args)?;
             let options = default_scan_options(&args);
             let snapshot = scan_device(options.clone())?;
             let selected_session_ids = values_after(&args, "--session");
@@ -60,17 +71,18 @@ fn main() -> anyhow::Result<()> {
                     allow_unencrypted_sensitive_payloads: args
                         .iter()
                         .any(|arg| arg == "--allow-unencrypted-sensitive-payloads"),
-                    encryption_passphrase: passphrase.clone(),
+                    encryption_passphrase: encryption.passphrase.clone(),
+                    encryption_recipient: encryption.recipient.clone(),
                 },
             )?;
-            write_bundle_file_with_passphrase(&bundle, &output, passphrase.as_deref())?;
+            write_bundle_file_with_encryption(&bundle, &output, &encryption)?;
             println!("{}", serde_json::to_string_pretty(&bundle.manifest)?);
         }
         "verify-bundle" => {
             let input =
                 value_after(&args, "--input").unwrap_or_else(|| "agent-sync.asbundle".to_string());
-            let passphrase = bundle_passphrase(&args);
-            let bundle = read_bundle_file_with_passphrase(input, passphrase.as_deref())?;
+            let decryption = bundle_file_decryption_options(&args)?;
+            let bundle = read_bundle_file_with_decryption(input, &decryption)?;
             let errors = verify_bundle(&bundle);
             println!("{}", serde_json::to_string_pretty(&errors)?);
             if !errors.is_empty() {
@@ -80,8 +92,8 @@ fn main() -> anyhow::Result<()> {
         "check-native-sessions" => {
             let input =
                 value_after(&args, "--input").unwrap_or_else(|| "agent-sync.asbundle".to_string());
-            let passphrase = bundle_passphrase(&args);
-            let bundle = read_bundle_file_with_passphrase(input, passphrase.as_deref())?;
+            let decryption = bundle_file_decryption_options(&args)?;
+            let bundle = read_bundle_file_with_decryption(input, &decryption)?;
             let selected_session_ids = selected_session_ids_or_all(&bundle, &args);
             let target_snapshot = if args.iter().any(|arg| arg == "--no-target-scan") {
                 None
@@ -156,7 +168,7 @@ fn main() -> anyhow::Result<()> {
         "import-native-sessions" => {
             let input =
                 value_after(&args, "--input").unwrap_or_else(|| "agent-sync.asbundle".to_string());
-            let passphrase = bundle_passphrase(&args);
+            let decryption = bundle_file_decryption_options(&args)?;
             let target_home = value_after(&args, "--target-home")
                 .map(PathBuf::from)
                 .or_else(|| env::var_os("HOME").map(PathBuf::from))
@@ -166,7 +178,7 @@ fn main() -> anyhow::Result<()> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("agent-sync-backups"));
             let selected_session_ids = values_after(&args, "--session");
-            let bundle = read_bundle_file_with_passphrase(input, passphrase.as_deref())?;
+            let bundle = read_bundle_file_with_decryption(input, &decryption)?;
             let journal = import_session_payloads_to_native_files(
                 &bundle,
                 &SessionNativeFileImportOptions {
@@ -220,7 +232,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
+                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
             );
             std::process::exit(2);
         }
@@ -291,6 +303,40 @@ fn bundle_passphrase(args: &[String]) -> Option<String> {
     value_after(args, "--bundle-passphrase")
         .or_else(|| env::var("AGENT_SYNC_BUNDLE_PASSPHRASE").ok())
         .filter(|value| !value.is_empty())
+}
+
+fn bundle_key_path(args: &[String]) -> Option<String> {
+    value_after(args, "--bundle-key")
+        .or_else(|| env::var("AGENT_SYNC_BUNDLE_KEY").ok())
+        .filter(|value| !value.is_empty())
+}
+
+fn bundle_file_encryption_options(args: &[String]) -> anyhow::Result<BundleFileEncryptionOptions> {
+    let passphrase = bundle_passphrase(args);
+    let key = bundle_key_path(args)
+        .map(read_bundle_device_key_file)
+        .transpose()?;
+    if passphrase.is_some() && key.is_some() {
+        anyhow::bail!("--bundle-passphrase and --bundle-key are mutually exclusive");
+    }
+    Ok(BundleFileEncryptionOptions {
+        passphrase,
+        recipient: key.map(|key| key.age_recipient),
+    })
+}
+
+fn bundle_file_decryption_options(args: &[String]) -> anyhow::Result<BundleFileDecryptionOptions> {
+    let passphrase = bundle_passphrase(args);
+    let key = bundle_key_path(args)
+        .map(read_bundle_device_key_file)
+        .transpose()?;
+    if passphrase.is_some() && key.is_some() {
+        anyhow::bail!("--bundle-passphrase and --bundle-key are mutually exclusive");
+    }
+    Ok(BundleFileDecryptionOptions {
+        passphrase,
+        identities: key.map(|key| vec![key.age_identity]).unwrap_or_default(),
+    })
 }
 
 fn selected_session_ids_or_all(

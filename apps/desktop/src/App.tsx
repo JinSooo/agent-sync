@@ -125,6 +125,13 @@ type SyncBundleManifest = {
   encryption: { required_for_sensitive_payloads: boolean; method: string };
 };
 
+type BundleDeviceKeySummary = {
+  schema_version: string;
+  id: string;
+  created_at: string;
+  age_recipient: string;
+};
+
 type PayloadEntry = {
   agent_id: string;
   portable_path: string;
@@ -382,6 +389,7 @@ export function App() {
   const [reviewApplyAcknowledged, setReviewApplyAcknowledged] = useState(false);
   const [allowUnencryptedSensitiveExport, setAllowUnencryptedSensitiveExport] = useState(false);
   const [bundlePassphrase, setBundlePassphrase] = useState('');
+  const [bundleKeyPath, setBundleKeyPath] = useState('');
   const [storeMessage, setStoreMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -444,6 +452,7 @@ export function App() {
     setError(null);
     try {
       const encryptionPassphrase = bundlePassphrase.length > 0 ? bundlePassphrase : undefined;
+      const encryptionKeyPath = bundleKeyPath.length > 0 ? bundleKeyPath : undefined;
       const manifest = await invoke<SyncBundleManifest>('export_bundle_file', {
         snapshot,
         output: exportPath,
@@ -453,7 +462,8 @@ export function App() {
         selectedSessionIds: selectedLocalSessionIds,
         maxSessionPayloadBytes: 2 * 1024 * 1024,
         allowUnencryptedSensitivePayloads: allowUnencryptedSensitiveExport,
-        encryptionPassphrase
+        encryptionPassphrase,
+        encryptionKeyPath
       });
       setBundleManifest(manifest);
       setBundlePath(exportPath);
@@ -470,7 +480,8 @@ export function App() {
     setVerifyErrors([]);
     try {
       const encryptionPassphrase = bundlePassphrase.length > 0 ? bundlePassphrase : undefined;
-      const bundle = await invoke<SyncBundle>('read_bundle', { path: bundlePath, encryptionPassphrase });
+      const encryptionKeyPath = bundleKeyPath.length > 0 ? bundleKeyPath : undefined;
+      const bundle = await invoke<SyncBundle>('read_bundle', { path: bundlePath, encryptionPassphrase, encryptionKeyPath });
       const errors = await invoke<string[]>('verify_bundle_command', { bundle });
       setImportedBundle(bundle);
       setRemoteSnapshot(bundle.source_snapshot);
@@ -855,6 +866,34 @@ export function App() {
     if (path) setBundlePath(path);
   }
 
+  async function chooseBundleKeyPath() {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: 'Agent Sync Device Key', extensions: ['json'] }]
+    });
+    const path = singlePath(selected);
+    if (path) setBundleKeyPath(path);
+  }
+
+  async function generateBundleKey() {
+    const selected = await save({
+      defaultPath: bundleKeyPath || 'agent-sync-device-key.json',
+      filters: [{ name: 'Agent Sync Device Key', extensions: ['json'] }]
+    });
+    if (!selected) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const key = await invoke<BundleDeviceKeySummary>('generate_bundle_key_file', { output: selected });
+      setBundleKeyPath(selected);
+      setStoreMessage(`bundle key generated: ${key.id}`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function chooseTargetProject() {
     const selected = await open({ directory: true, multiple: false });
     const path = singlePath(selected);
@@ -922,6 +961,9 @@ export function App() {
   );
   const sensitiveLocalPayloadSelected = selectedLocalReviewPayloadKeys.length > 0 || selectedLocalSessionIds.length > 0;
   const bundlePassphraseProvided = bundlePassphrase.length > 0;
+  const bundleKeyProvided = bundleKeyPath.length > 0;
+  const bundleEncryptionInputConflict = bundlePassphraseProvided && bundleKeyProvided;
+  const bundleEncryptedExportSelected = bundlePassphraseProvided || bundleKeyProvided;
   const selectedOperations = useMemo(() => (plan ? plan.operations.filter((operation) => selectedOperationIds.includes(operation.id)) : []), [plan, selectedOperationIds]);
   const selectedReviewOperations = useMemo(() => selectedOperations.filter(isReviewPayloadApplicable), [selectedOperations]);
   const autoApplicableCount = plan?.operations.filter(isAutoApplicable).length ?? 0;
@@ -1069,19 +1111,28 @@ export function App() {
                 Bundle passphrase
                 <input type="password" value={bundlePassphrase} onChange={(event) => setBundlePassphrase(event.target.value)} placeholder="encrypt export / decrypt import" />
               </label>
-              <button className="secondary" onClick={exportBundle} disabled={!snapshot || busy || (sensitiveLocalPayloadSelected && !bundlePassphraseProvided && !allowUnencryptedSensitiveExport)}>Export local bundle</button>
+              <label>
+                Bundle key file
+                <input value={bundleKeyPath} onChange={(event) => setBundleKeyPath(event.target.value)} placeholder="agent-sync-device-key.json" />
+              </label>
+              <button className="secondary" onClick={chooseBundleKeyPath} disabled={busy}>Choose key…</button>
+              <button className="secondary" onClick={generateBundleKey} disabled={busy}>Generate key…</button>
+              <button className="secondary" onClick={exportBundle} disabled={!snapshot || busy || bundleEncryptionInputConflict || (sensitiveLocalPayloadSelected && !bundleEncryptedExportSelected && !allowUnencryptedSensitiveExport)}>Export local bundle</button>
               <label>
                 Import bundle path
                 <input value={bundlePath} onChange={(event) => setBundlePath(event.target.value)} />
               </label>
               <button className="secondary" onClick={chooseBundlePath} disabled={busy}>Choose bundle…</button>
-              <button className="secondary" onClick={importBundle} disabled={busy || !bundlePath}>Import + verify bundle</button>
+              <button className="secondary" onClick={importBundle} disabled={busy || !bundlePath || bundleEncryptionInputConflict}>Import + verify bundle</button>
               <button onClick={createImportPlan} disabled={!snapshot || !remoteSnapshot || busy}>Plan remote → local</button>
             </div>
-            {sensitiveLocalPayloadSelected && !bundlePassphraseProvided && (
+            {bundleEncryptionInputConflict && (
+              <p className="notice">Use either a bundle passphrase or a bundle key file, not both.</p>
+            )}
+            {sensitiveLocalPayloadSelected && !bundleEncryptedExportSelected && (
               <label className="ackBox">
                 <input type="checkbox" checked={allowUnencryptedSensitiveExport} onChange={(event) => setAllowUnencryptedSensitiveExport(event.target.checked)} />
-                I understand selected memory/MCP or raw session payloads will be exported without bundle encryption because no passphrase is set. Prefer a passphrase for cross-device transport.
+                I understand selected memory/MCP or raw session payloads will be exported without bundle encryption because no passphrase or key file is set. Prefer a passphrase or shared device key for cross-device transport.
               </label>
             )}
             {bundleManifest && (
