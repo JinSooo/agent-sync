@@ -137,6 +137,14 @@ type OperationJournal = {
   operations: Array<{ status: string; message?: string; operation: ApplyOperation; backup?: { backup_path: string } }>;
 };
 
+type StoredRecord = {
+  id: string;
+  kind: string;
+  created_at: string;
+  updated_at: string;
+  json: string;
+};
+
 type SessionArchiveImportJournal = {
   id: string;
   status: string;
@@ -233,6 +241,7 @@ export function App() {
   const [sessionArchiveJournal, setSessionArchiveJournal] = useState<SessionArchiveImportJournal | null>(null);
   const [sessionStageJournal, setSessionStageJournal] = useState<SessionNativeImportStageJournal | null>(null);
   const [sessionNativeFileJournal, setSessionNativeFileJournal] = useState<SessionNativeFileImportJournal | null>(null);
+  const [journalHistory, setJournalHistory] = useState<StoredRecord[]>([]);
   const [bundleManifest, setBundleManifest] = useState<SyncBundleManifest | null>(null);
   const [verifyErrors, setVerifyErrors] = useState<string[]>([]);
   const [selectedOperationIds, setSelectedOperationIds] = useState<string[]>([]);
@@ -370,6 +379,12 @@ export function App() {
         acknowledgeReviewRequired: reviewApplyAcknowledged
       });
       setJournal(nextJournal);
+      const id = await invoke<string>('save_operation_journal', {
+        dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
+        journal: nextJournal
+      });
+      setStoreMessage(`apply journal saved: ${id}`);
+      await refreshJournalHistory();
     } catch (err) {
       setError(String(err));
     } finally {
@@ -384,6 +399,12 @@ export function App() {
     try {
       const nextJournal = await invoke<OperationJournal>('rollback_journal_command', { journal });
       setJournal(nextJournal);
+      const id = await invoke<string>('save_operation_journal', {
+        dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
+        journal: nextJournal
+      });
+      setStoreMessage(`rollback journal saved: ${id}`);
+      await refreshJournalHistory();
     } catch (err) {
       setError(String(err));
     } finally {
@@ -465,6 +486,25 @@ export function App() {
       setError(String(err));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function refreshJournalHistory() {
+    const rows = await invoke<StoredRecord[]>('list_store_records', {
+      dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
+      kind: 'apply_journal'
+    });
+    setJournalHistory(rows);
+  }
+
+  async function loadJournalFromHistory(record: StoredRecord) {
+    setError(null);
+    try {
+      const parsed = JSON.parse(record.json) as OperationJournal;
+      setJournal(parsed);
+      setStoreMessage(`apply journal loaded: ${record.id}`);
+    } catch (err) {
+      setError(`Failed to parse stored journal ${record.id}: ${String(err)}`);
     }
   }
 
@@ -634,6 +674,7 @@ export function App() {
                 Archive store
                 <input value={archiveStorePath} onChange={(event) => setArchiveStorePath(event.target.value)} placeholder="agent-sync-studio.sqlite" />
               </label>
+              <button className="secondary" onClick={refreshJournalHistory} disabled={busy}>Refresh apply journals</button>
               <label>
                 Session staging directory
                 <input value={sessionStageDir} onChange={(event) => setSessionStageDir(event.target.value)} placeholder="agent-sync-session-staging" />
@@ -871,6 +912,27 @@ export function App() {
             </ul>
           </section>
         )}
+        <section className="panel">
+          <div className="panelTitle">
+            <h2>Apply journal history</h2>
+            <span>{journalHistory.length} stored in {archiveStorePath || 'agent-sync-studio.sqlite'}</span>
+          </div>
+          {journalHistory.length ? (
+            <ul className="operationList">
+              {journalHistory.slice(0, 20).map((record) => {
+                const summary = storedJournalSummary(record);
+                return (
+                  <li key={record.id}>
+                    <button className="secondary smallButton" onClick={() => loadJournalFromHistory(record)} disabled={busy}>Load</button>{' '}
+                    {record.id} · {summary.status} · ops {summary.operations} · updated {record.updated_at}
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="empty">Apply journals are saved automatically after apply/rollback. Refresh to load rollback points from the local SQLite store.</p>
+          )}
+        </section>
         {sessionArchiveJournal && (
           <section className="panel">
             <div className="panelTitle">
@@ -974,6 +1036,15 @@ function payloadKeyToSelection(key: string): PayloadSelectionRef {
     agent_id: decodeURIComponent(agentId),
     portable_path: decodeURIComponent(portablePath)
   };
+}
+
+function storedJournalSummary(record: StoredRecord): { status: string; operations: number } {
+  try {
+    const journal = JSON.parse(record.json) as OperationJournal;
+    return { status: journal.status, operations: journal.operations.length };
+  } catch {
+    return { status: 'invalid_json', operations: 0 };
+  }
 }
 
 function Metric({ label, value }: { label: string; value: string | number }) {

@@ -35,7 +35,7 @@ The older Node CLI remains available as a legacy reference while the Rust/Tauri 
 - Import selected raw session payloads into the target home as native Codex/Claude session files, limited to `~/.codex/**` and `~/.claude/**`, with backup, path rewriting, and checksum journal.
 - Apply selected safe payloads with backups and checksum verification.
 - Roll back apply journals by restoring backed-up files or removing files that did not exist before the apply.
-- Persist snapshots in a local SQLite record store.
+- Persist snapshots and apply journals in a local SQLite record store so rollback points survive app restarts.
 
 ## Commands
 
@@ -83,6 +83,7 @@ Automatically applicable today:
 - safe text config payloads from a verified bundle, only through selected operations, with backup and checksum verification.
 - explicitly selected `memory_knowledge` and `mcp_config` text payloads from a verified bundle, only after the review-acknowledgement gate, with backup and checksum verification.
 - apply journal rollback for backup-backed changes and files created by the apply.
+- automatic apply-journal persistence into the local SQLite store, with UI loading of stored rollback points.
 - metadata-only session archive records into Agent Sync Studio SQLite storage.
 - selected raw session payloads into an isolated staging directory with project-path rewrite journal.
 - selected raw session payloads into native Codex/Claude file locations under a chosen target home, with strict `~/.codex/**` / `~/.claude/**` allowlisting, backup, optional project-path rewrite, and checksum verification. This does not rewrite native Codex/Claude databases or secondary indexes.

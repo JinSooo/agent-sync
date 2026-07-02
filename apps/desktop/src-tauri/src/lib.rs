@@ -158,6 +158,14 @@ fn rollback_journal_command(journal: OperationJournal) -> Result<OperationJourna
 }
 
 #[tauri::command]
+fn save_operation_journal(db_path: String, journal: OperationJournal) -> Result<String, String> {
+    let store = AgentSyncStore::open(db_path).map_err(|error| error.to_string())?;
+    store
+        .save_json("apply_journal", Some(journal.id), &journal)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn import_session_archives_command(
     bundle: SyncBundle,
     db_path: String,
@@ -252,6 +260,7 @@ pub fn run() {
             create_operation_journal,
             apply_safe_payloads_command,
             rollback_journal_command,
+            save_operation_journal,
             import_session_archives_command,
             stage_session_native_import_command,
             import_session_payloads_to_native_files_command,

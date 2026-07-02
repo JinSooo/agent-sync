@@ -61,8 +61,8 @@ Implemented:
 - Tauri 2 desktop shell with React/Vite UI.
 - Rust scan/diff/transform/preflight/journal commands.
 - Real `.asbundle` JSON container with source snapshot, payload checksums, safe config payloads, explicitly selected memory/MCP review payloads, metadata-only session archive entries, explicitly selected raw session payloads, and secret redactions.
-- Local SQLite store for snapshots/plans/journals as JSON records.
-- Safe config plus acknowledged memory/MCP review apply path with visual operation selection, backup, operation journal, checksum verification, and journal rollback.
+- Local SQLite store for snapshots, apply journals, and session archive records as JSON records.
+- Safe config plus acknowledged memory/MCP review apply path with visual operation selection, backup, operation journal, checksum verification, automatic journal persistence, history loading, and journal rollback.
 - Session Library flow: choose local sessions for raw payload export; choose remote Codex/Claude session archives, bind them to the target home/project path, import metadata-only records into local Agent Sync Studio SQLite storage, stage selected raw payloads into an isolated native-import directory, or write selected payloads to native Codex/Claude session-file locations with project-path rewrite evidence.
 - Rust CLI: `scan`, `bundle-manifest`, `export-bundle`, `verify-bundle`, `import-native-sessions`, `self-plan`.
 
