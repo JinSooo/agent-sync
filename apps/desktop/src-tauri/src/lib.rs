@@ -1,10 +1,12 @@
 use agent_sync_apply::{
     ApplyContext, ApplyPayloadOptions, OperationJournal, PreflightReport,
     SessionArchiveImportJournal, SessionArchiveImportOptions, SessionNativeFileImportJournal,
-    SessionNativeFileImportOptions, SessionNativeImportStageJournal,
+    SessionNativeFileImportOptions, SessionNativeImportReadinessOptions,
+    SessionNativeImportReadinessReport, SessionNativeImportStageJournal,
     SessionNativeImportStageOptions, apply_payloads, create_journal, import_session_archives,
     import_session_payloads_to_native_files, preflight, rollback_journal,
-    rollback_session_native_file_import_journal, stage_session_native_import,
+    rollback_session_native_file_import_journal, session_native_import_readiness,
+    stage_session_native_import,
 };
 use agent_sync_bundle::{
     BundleExportOptions, PayloadSelectionRef, SyncBundle, SyncBundleManifest, export_bundle,
@@ -221,6 +223,23 @@ fn stage_session_native_import_command(
 }
 
 #[tauri::command]
+fn session_native_import_readiness_command(
+    bundle: SyncBundle,
+    target_snapshot: Option<DeviceSnapshot>,
+    selected_session_ids: Vec<String>,
+    require_agents_stopped: Option<bool>,
+) -> Result<SessionNativeImportReadinessReport, String> {
+    Ok(session_native_import_readiness(
+        &bundle,
+        target_snapshot.as_ref(),
+        &SessionNativeImportReadinessOptions {
+            selected_session_ids,
+            require_agents_stopped: require_agents_stopped.unwrap_or(true),
+        },
+    ))
+}
+
+#[tauri::command]
 fn import_session_payloads_to_native_files_command(
     bundle: SyncBundle,
     selected_session_ids: Vec<String>,
@@ -288,6 +307,7 @@ pub fn run() {
             save_session_native_file_import_journal,
             import_session_archives_command,
             stage_session_native_import_command,
+            session_native_import_readiness_command,
             import_session_payloads_to_native_files_command,
             rollback_session_native_file_import_journal_command,
             save_snapshot_to_store,

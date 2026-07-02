@@ -1,5 +1,5 @@
 use agent_sync_bundle::SyncBundle;
-use agent_sync_core::SafetyClass;
+use agent_sync_core::{AdapterCapabilities, DeviceSnapshot, SafetyClass};
 use agent_sync_platform::{RunningAgentProcess, detect_running_agent_processes};
 use agent_sync_storage::AgentSyncStore;
 use agent_sync_transform::{ApplyOperationKind, TransformPlan};
@@ -207,6 +207,39 @@ pub struct NativeFilePayloadRecord {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionNativeImportReadinessOptions {
+    pub selected_session_ids: Vec<String>,
+    pub require_agents_stopped: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionNativeImportReadinessReport {
+    pub selected: usize,
+    pub ready: usize,
+    pub blocked: usize,
+    pub warnings: Vec<String>,
+    pub blockers: Vec<String>,
+    pub entries: Vec<SessionNativeImportReadinessEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionNativeImportReadinessEntry {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub session_id: String,
+    pub title: Option<String>,
+    pub payloads: usize,
+    pub can_import_native_files: bool,
+    pub can_rewrite_project_identity: bool,
+    pub can_remap_session_project: bool,
+    pub requires_app_stopped: bool,
+    pub ready: bool,
+    pub warnings: Vec<String>,
+    pub blockers: Vec<String>,
+    pub note: String,
+}
+
 pub fn create_journal(plan: &TransformPlan) -> OperationJournal {
     OperationJournal {
         id: Uuid::new_v4(),
@@ -224,6 +257,144 @@ pub fn create_journal(plan: &TransformPlan) -> OperationJournal {
             })
             .collect(),
         status: JournalStatus::Draft,
+    }
+}
+
+pub fn session_native_import_readiness(
+    bundle: &SyncBundle,
+    target_snapshot: Option<&DeviceSnapshot>,
+    options: &SessionNativeImportReadinessOptions,
+) -> SessionNativeImportReadinessReport {
+    let selected_ids = options
+        .selected_session_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut found_ids = BTreeSet::new();
+    let mut entries = Vec::new();
+
+    for archive in &bundle.session_archives {
+        if !selected_ids.contains(&archive.session.id) {
+            continue;
+        }
+        found_ids.insert(archive.session.id.clone());
+
+        let target_agent = target_snapshot.and_then(|snapshot| {
+            snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.id == archive.agent_id)
+        });
+        let capabilities = target_agent
+            .map(|agent| agent.capabilities.clone())
+            .or_else(|| {
+                bundle
+                    .source_snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.id == archive.agent_id)
+                    .map(|agent| agent.capabilities.clone())
+            })
+            .unwrap_or_else(|| session_import_capabilities_as_adapter(&archive.session));
+
+        let mut warnings = Vec::new();
+        let mut blockers = Vec::new();
+        if target_snapshot.is_none() {
+            warnings.push(
+                "target device has not been scanned in this UI session; readiness uses bundle metadata fallback"
+                    .to_string(),
+            );
+        } else if target_agent.is_none() {
+            warnings.push(format!(
+                "{} was not detected on the target scan; native import will only write allowlisted files and will not prove app-level indexes",
+                archive.agent_name
+            ));
+        }
+
+        if archive.payloads.is_empty() {
+            blockers.push(
+                "raw session payload is missing; re-export the source bundle with this session selected"
+                    .to_string(),
+            );
+        }
+        if !capabilities.can_import_sessions {
+            blockers
+                .push("target adapter does not claim native session import support".to_string());
+        }
+        if !capabilities.can_remap_session_project {
+            warnings.push(
+                "DB/index project remap is not claimed; only text path rewrite inside exported payload files is supported"
+                    .to_string(),
+            );
+        }
+        if capabilities.requires_app_stopped_for_session_apply {
+            if options.require_agents_stopped {
+                warnings.push(
+                    "Codex/Claude stopped-agent preflight will run before writing native files"
+                        .to_string(),
+                );
+            } else {
+                warnings.push(
+                    "stopped-agent preflight is manually disabled; this is a user-accepted override"
+                        .to_string(),
+                );
+            }
+        }
+        if !capabilities.supports_transactional_apply {
+            warnings.push(
+                "adapter does not claim transactional native apply; rollback depends on the saved import journal and backups"
+                    .to_string(),
+            );
+        }
+
+        let ready = blockers.is_empty();
+        entries.push(SessionNativeImportReadinessEntry {
+            agent_id: archive.agent_id.clone(),
+            agent_name: archive.agent_name.clone(),
+            session_id: archive.session.id.clone(),
+            title: archive.session.title.clone(),
+            payloads: archive.payloads.len(),
+            can_import_native_files: capabilities.can_import_sessions,
+            can_rewrite_project_identity: true,
+            can_remap_session_project: capabilities.can_remap_session_project,
+            requires_app_stopped: capabilities.requires_app_stopped_for_session_apply,
+            ready,
+            warnings,
+            blockers,
+            note: if ready {
+                "ready for native file import; DB/index remap remains capability-gated".to_string()
+            } else {
+                "not ready for native file import until blockers are resolved".to_string()
+            },
+        });
+    }
+
+    let mut blockers = Vec::new();
+    if selected_ids.is_empty() {
+        blockers.push("no sessions selected for native import readiness check".to_string());
+    }
+    for missing in selected_ids.difference(&found_ids) {
+        blockers.push(format!("selected session not found in bundle: {missing}"));
+    }
+    let mut warnings = Vec::new();
+    if entries
+        .iter()
+        .any(|entry| !entry.can_remap_session_project && entry.ready)
+    {
+        warnings.push(
+            "one or more ready sessions still lack DB/index project remap support".to_string(),
+        );
+    }
+
+    let ready = entries.iter().filter(|entry| entry.ready).count();
+    let blocked = options.selected_session_ids.len().saturating_sub(ready);
+    SessionNativeImportReadinessReport {
+        selected: options.selected_session_ids.len(),
+        ready,
+        blocked,
+        warnings,
+        blockers,
+        entries,
     }
 }
 
@@ -573,6 +744,24 @@ pub fn import_session_payloads_to_native_files_with_processes(
             JournalStatus::Completed
         },
     })
+}
+
+fn session_import_capabilities_as_adapter(
+    session: &agent_sync_core::SessionRecord,
+) -> AdapterCapabilities {
+    AdapterCapabilities {
+        can_export_config: false,
+        can_import_config: false,
+        can_export_memory: false,
+        can_import_memory: false,
+        can_list_sessions: false,
+        can_export_sessions: false,
+        can_import_sessions: session.import_capabilities.import_as_archive
+            || session.import_capabilities.import_as_new_session,
+        can_remap_session_project: session.import_capabilities.identity_rewrite,
+        requires_app_stopped_for_session_apply: session.import_capabilities.requires_app_stopped,
+        supports_transactional_apply: false,
+    }
 }
 
 fn selected_agent_ids_with_payloads(
@@ -2067,6 +2256,79 @@ mod tests {
             "new native session"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn readiness_reports_native_file_import_and_db_remap_gap() {
+        let bundle = codex_session_payload_bundle(b"new native session".to_vec());
+        let mut target_snapshot = bundle.source_snapshot.clone();
+        target_snapshot.agents = vec![agent_sync_core::AgentSnapshot {
+            id: "codex".into(),
+            name: "OpenAI Codex".into(),
+            detected: true,
+            capabilities: agent_sync_core::AdapterCapabilities {
+                can_import_sessions: true,
+                requires_app_stopped_for_session_apply: true,
+                can_export_sessions: true,
+                can_list_sessions: true,
+                ..Default::default()
+            },
+            roots: vec![],
+            findings: vec![],
+            sessions: vec![],
+        }];
+
+        let report = session_native_import_readiness(
+            &bundle,
+            Some(&target_snapshot),
+            &SessionNativeImportReadinessOptions {
+                selected_session_ids: vec!["codex:session-1".into()],
+                require_agents_stopped: true,
+            },
+        );
+
+        assert_eq!(report.selected, 1);
+        assert_eq!(report.ready, 1);
+        assert_eq!(report.blocked, 0);
+        assert!(report.blockers.is_empty());
+        assert!(!report.entries[0].can_remap_session_project);
+        assert!(
+            report.entries[0]
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("DB/index project remap is not claimed"))
+        );
+        assert!(
+            report.entries[0]
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("stopped-agent preflight will run"))
+        );
+    }
+
+    #[test]
+    fn readiness_blocks_missing_raw_session_payload() {
+        let mut bundle = codex_session_payload_bundle(b"new native session".to_vec());
+        bundle.session_archives[0].payloads.clear();
+        bundle.session_archives[0].payload_included = false;
+
+        let report = session_native_import_readiness(
+            &bundle,
+            None,
+            &SessionNativeImportReadinessOptions {
+                selected_session_ids: vec!["codex:session-1".into()],
+                require_agents_stopped: true,
+            },
+        );
+
+        assert_eq!(report.ready, 0);
+        assert_eq!(report.blocked, 1);
+        assert!(
+            report.entries[0]
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("raw session payload is missing"))
+        );
     }
 
     fn codex_session_payload_bundle(bytes: Vec<u8>) -> SyncBundle {

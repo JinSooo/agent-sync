@@ -238,6 +238,29 @@ type SessionNativeFileImportJournal = {
   }>;
 };
 
+type SessionNativeImportReadinessReport = {
+  selected: number;
+  ready: number;
+  blocked: number;
+  warnings: string[];
+  blockers: string[];
+  entries: Array<{
+    agent_id: string;
+    agent_name: string;
+    session_id: string;
+    title?: string;
+    payloads: number;
+    can_import_native_files: boolean;
+    can_rewrite_project_identity: boolean;
+    can_remap_session_project: boolean;
+    requires_app_stopped: boolean;
+    ready: boolean;
+    warnings: string[];
+    blockers: string[];
+    note: string;
+  }>;
+};
+
 const safetyOrder = ['safe_config', 'memory_knowledge', 'mcp_config', 'raw_session', 'executable', 'database', 'secret_bearing', 'binary_or_cache', 'unknown'];
 const autoApplyKinds = new Set(['merge_text', 'copy_file']);
 const reviewPayloadClasses = new Set(['memory_knowledge', 'mcp_config']);
@@ -283,6 +306,7 @@ export function App() {
   const [sessionArchiveJournal, setSessionArchiveJournal] = useState<SessionArchiveImportJournal | null>(null);
   const [sessionStageJournal, setSessionStageJournal] = useState<SessionNativeImportStageJournal | null>(null);
   const [sessionNativeFileJournal, setSessionNativeFileJournal] = useState<SessionNativeFileImportJournal | null>(null);
+  const [sessionReadinessReport, setSessionReadinessReport] = useState<SessionNativeImportReadinessReport | null>(null);
   const [journalHistory, setJournalHistory] = useState<StoredRecord[]>([]);
   const [sessionNativeFileJournalHistory, setSessionNativeFileJournalHistory] = useState<StoredRecord[]>([]);
   const [bundleManifest, setBundleManifest] = useState<SyncBundleManifest | null>(null);
@@ -317,6 +341,7 @@ export function App() {
       setSessionArchiveJournal(null);
       setSessionStageJournal(null);
       setSessionNativeFileJournal(null);
+      setSessionReadinessReport(null);
       setBundleManifest(null);
       setStoreMessage(null);
       setSelectedLocalSessionIds([]);
@@ -382,6 +407,7 @@ export function App() {
       setSessionArchiveJournal(null);
       setSessionStageJournal(null);
       setSessionNativeFileJournal(null);
+      setSessionReadinessReport(null);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -488,6 +514,25 @@ export function App() {
         rewriteProjectIdentity: true
       });
       setSessionStageJournal(nextJournal);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function checkSessionNativeImportReadiness() {
+    if (!importedBundle) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const report = await invoke<SessionNativeImportReadinessReport>('session_native_import_readiness_command', {
+        bundle: importedBundle,
+        targetSnapshot: snapshot ?? undefined,
+        selectedSessionIds,
+        requireAgentsStopped
+      });
+      setSessionReadinessReport(report);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -656,6 +701,7 @@ export function App() {
 
   function toggleSession(id: string) {
     setSelectedSessionIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+    setSessionReadinessReport(null);
   }
 
   function toggleLocalSession(id: string) {
@@ -917,12 +963,35 @@ export function App() {
                   Current adapter capability is native-file import only: project text paths can be rewritten, but Codex/Claude DB/index project remap is not claimed.
                 </div>
               )}
+              <button className="secondary" onClick={checkSessionNativeImportReadiness} disabled={!importedBundle || selectedSessionIds.length === 0 || busy}>
+                Check native import readiness
+              </button>
+              {sessionReadinessReport && (
+                <div className={sessionReadinessReport.blocked === 0 && sessionReadinessReport.blockers.length === 0 ? 'preflight pass' : 'preflight fail'}>
+                  Native import readiness: ready {sessionReadinessReport.ready}/{sessionReadinessReport.selected} · blocked {sessionReadinessReport.blocked}
+                  {sessionReadinessReport.blockers.length > 0 && <small>{sessionReadinessReport.blockers.join(' / ')}</small>}
+                  {sessionReadinessReport.warnings.length > 0 && <small>{sessionReadinessReport.warnings.join(' / ')}</small>}
+                  <ul>
+                    {sessionReadinessReport.entries.map((entry) => (
+                      <li key={entry.session_id}>
+                        {entry.ready ? 'ready' : 'blocked'} · {entry.agent_name} · {entry.title ?? entry.session_id} · payloads {entry.payloads} · {entry.can_remap_session_project ? 'DB/index remap supported' : 'file rewrite only'}
+                        <small>{entry.note}</small>
+                        {entry.blockers.length > 0 && <small>blockers: {entry.blockers.join(' / ')}</small>}
+                        {entry.warnings.length > 0 && <small>warnings: {entry.warnings.join(' / ')}</small>}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               <button className="secondary" onClick={stageSelectedSessionPayloads} disabled={!importedBundle || selectedSessionIds.length === 0 || busy || !selectedSessionsCanNativeImport}>
                 Stage selected native session payloads
               </button>
               {selectedSessionsRequireStopped && (
                 <label className="ackBox">
-                  <input type="checkbox" checked={requireAgentsStopped} onChange={(event) => setRequireAgentsStopped(event.target.checked)} />
+                  <input type="checkbox" checked={requireAgentsStopped} onChange={(event) => {
+                    setRequireAgentsStopped(event.target.checked);
+                    setSessionReadinessReport(null);
+                  }} />
                   Require Codex/Claude to be stopped before writing native session files. Uncheck only for an explicit manual override.
                 </label>
               )}

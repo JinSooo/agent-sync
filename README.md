@@ -32,6 +32,7 @@ The older Node CLI remains available as a legacy reference while the Rust/Tauri 
 - Choose local Codex/Claude sessions whose raw payloads should be included in the next bundle, gated by adapter export capability.
 - Choose remote Codex/Claude session archives and import them into the local Agent Sync Studio archive store with target-project mapping; native-file actions are gated by adapter import capability.
 - Stage selected raw session payloads into an isolated native-import directory with optional source-project to target-project path rewriting.
+- Check native session import readiness before writing, including raw-payload presence, adapter capability, stopped-agent preflight posture, rollback limits, and DB/index remap gaps.
 - Import selected raw session payloads into the target home as native Codex/Claude session files, limited to `~/.codex/**` and `~/.claude/**`, with backup, path rewriting, checksum journal, default stopped-agent preflight for Codex/Claude, and native-file rollback.
 - Apply selected safe payloads with backups and checksum verification.
 - Roll back apply journals and native session import journals by restoring backed-up files or removing files that did not exist before the apply/import.
@@ -89,6 +90,7 @@ Automatically applicable today:
 - automatic apply-journal and native session import-journal persistence into the local SQLite store, with UI loading of stored rollback points.
 - metadata-only session archive records into Agent Sync Studio SQLite storage.
 - selected raw session payloads into an isolated staging directory with project-path rewrite journal.
+- native session import readiness reports that are read-only and explicitly warn when the current adapter supports native-file import but not Codex/Claude DB/index project remap.
 - selected raw session payloads into native Codex/Claude file locations under a chosen target home, with strict `~/.codex/**` / `~/.claude/**` allowlisting, adapter capability gating, default Codex/Claude stopped-agent preflight, backup, optional project-path rewrite, checksum verification, and rollback from the native import journal. The UI exposes an explicit manual override and the CLI exposes `--skip-agent-stopped-check`; this does not rewrite native Codex/Claude databases or secondary indexes, and the adapter capability model does not claim DB/index remap support until fixtures prove it.
 
 See `.omx/plans/agent-sync-studio-full-architecture-20260701.md` and `docs/agent-sync-studio-architecture.md` for the full implementation architecture.
