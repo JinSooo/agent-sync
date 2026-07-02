@@ -144,6 +144,34 @@ pub struct BundleRecipientRotationPlan {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BundleRecipientInventory {
+    pub schema_version: String,
+    pub id: Uuid,
+    pub generated_at: DateTime<Utc>,
+    pub source_label: Option<String>,
+    pub profile_count: usize,
+    pub digest: String,
+    pub profiles: Vec<BundleRecipientProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BundleRecipientInventorySkip {
+    pub age_recipient: String,
+    pub label: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BundleRecipientInventoryImportReport {
+    pub schema_version: String,
+    pub inventory_id: Uuid,
+    pub imported_count: usize,
+    pub skipped_count: usize,
+    pub imported_profiles: Vec<BundleRecipientProfile>,
+    pub skipped: Vec<BundleRecipientInventorySkip>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct BundleDeviceKeyBackupPayload {
     schema_version: String,
     backed_up_at: DateTime<Utc>,
@@ -742,6 +770,72 @@ pub fn revoke_bundle_recipient_profile(
     revoked
 }
 
+pub fn create_bundle_recipient_inventory(
+    profiles: &[BundleRecipientProfile],
+    source_label: Option<String>,
+    include_revoked: bool,
+) -> BundleRecipientInventory {
+    let profiles = profiles
+        .iter()
+        .filter(|profile| include_revoked || !profile.revoked)
+        .cloned()
+        .collect::<Vec<_>>();
+    let digest = bundle_recipient_inventory_digest(&profiles);
+    BundleRecipientInventory {
+        schema_version: "0.2".to_string(),
+        id: Uuid::new_v4(),
+        generated_at: Utc::now(),
+        source_label: trimmed_optional(source_label),
+        profile_count: profiles.len(),
+        digest,
+        profiles,
+    }
+}
+
+pub fn write_bundle_recipient_inventory_file(
+    inventory: &BundleRecipientInventory,
+    path: impl AsRef<Path>,
+) -> std::io::Result<()> {
+    let json = serde_json::to_vec_pretty(inventory).map_err(std::io::Error::other)?;
+    fs::write(path, json)
+}
+
+pub fn read_bundle_recipient_inventory_file(
+    path: impl AsRef<Path>,
+) -> std::io::Result<BundleRecipientInventory> {
+    let bytes = fs::read(path)?;
+    let inventory: BundleRecipientInventory =
+        serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
+    if inventory.schema_version != "0.2" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unsupported recipient inventory schema version",
+        ));
+    }
+    for profile in &inventory.profiles {
+        parse_age_recipient(&profile.age_recipient)?;
+    }
+    let digest = bundle_recipient_inventory_digest(&inventory.profiles);
+    if digest != inventory.digest {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "recipient inventory digest mismatch",
+        ));
+    }
+    Ok(inventory)
+}
+
+pub fn bundle_recipient_profile_from_inventory(
+    inventory: &BundleRecipientInventory,
+    profile: &BundleRecipientProfile,
+) -> BundleRecipientProfile {
+    let mut imported = profile.clone();
+    imported.id = Uuid::new_v4();
+    imported.updated_at = Utc::now();
+    imported.source = format!("inventory:{}", inventory.id);
+    imported
+}
+
 pub fn bundle_recipient_rotation_plan(
     profiles: &[BundleRecipientProfile],
     stale_after_days: i64,
@@ -864,6 +958,34 @@ fn trimmed_optional(value: Option<String>) -> Option<String> {
         let value = value.trim().to_string();
         (!value.is_empty()).then_some(value)
     })
+}
+
+fn bundle_recipient_inventory_digest(profiles: &[BundleRecipientProfile]) -> String {
+    let mut rows = profiles
+        .iter()
+        .map(|profile| {
+            serde_json::json!({
+                "id": profile.id,
+                "age_recipient": &profile.age_recipient,
+                "label": &profile.label,
+                "device_hint": &profile.device_hint,
+                "platform_hint": &profile.platform_hint,
+                "source": &profile.source,
+                "note": &profile.note,
+                "revoked": profile.revoked,
+                "created_at": profile.created_at,
+                "updated_at": profile.updated_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|a, b| {
+        a["age_recipient"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(b["age_recipient"].as_str().unwrap_or_default())
+    });
+    let bytes = serde_json::to_vec(&rows).unwrap_or_default();
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn short_recipient(recipient: &str) -> String {
@@ -1175,6 +1297,39 @@ mod tests {
                 .unwrap_or_default()
                 .contains("rotated on remote")
         );
+    }
+
+    #[test]
+    fn exports_and_imports_public_recipient_inventory() {
+        let root =
+            std::env::temp_dir().join(format!("agent-sync-recipient-inventory-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("recipients.json");
+        let key = generate_bundle_device_key();
+        let profile = bundle_recipient_profile_from_input(
+            "Windows desktop",
+            Some("win-dev".into()),
+            Some("windows".into()),
+            &key.age_recipient,
+            Some("paired during setup".into()),
+            Some("test".into()),
+        )
+        .unwrap();
+
+        let inventory =
+            create_bundle_recipient_inventory(&[profile.clone()], Some("macbook".into()), false);
+        assert_eq!(inventory.profile_count, 1);
+        assert!(!inventory.digest.is_empty());
+        write_bundle_recipient_inventory_file(&inventory, &path).unwrap();
+        let restored = read_bundle_recipient_inventory_file(&path).unwrap();
+        assert_eq!(restored.digest, inventory.digest);
+        assert_eq!(restored.profiles[0].age_recipient, profile.age_recipient);
+
+        let imported = bundle_recipient_profile_from_inventory(&restored, &restored.profiles[0]);
+        assert_ne!(imported.id, profile.id);
+        assert_eq!(imported.age_recipient, profile.age_recipient);
+        assert_eq!(imported.source, format!("inventory:{}", restored.id));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

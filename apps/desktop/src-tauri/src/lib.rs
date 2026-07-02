@@ -17,21 +17,24 @@ use agent_sync_apply::{
 };
 use agent_sync_bundle::{
     BUNDLE_RECIPIENT_PROFILE_KIND, BundleDeviceKeySummary, BundleExportOptions,
-    BundleFileDecryptionOptions, BundleFileEncryptionOptions, BundleRecipientProfile,
+    BundleFileDecryptionOptions, BundleFileEncryptionOptions, BundleRecipientInventory,
+    BundleRecipientInventoryImportReport, BundleRecipientInventorySkip, BundleRecipientProfile,
     BundleRecipientRotationPlan, PayloadSelectionRef, SyncBundle, SyncBundleManifest,
     bundle_recipient_from_input, bundle_recipient_profile_from_input,
-    bundle_recipient_rotation_plan, delete_bundle_device_key_keyring, export_bundle,
+    bundle_recipient_profile_from_inventory, bundle_recipient_rotation_plan,
+    create_bundle_recipient_inventory, delete_bundle_device_key_keyring, export_bundle,
     export_bundle_device_key_keyring_backup, generate_bundle_device_key_file,
     generate_bundle_device_key_keyring, manifest_from_snapshot, read_bundle_device_key_file,
     read_bundle_device_key_keyring, read_bundle_file_with_decryption,
-    restore_bundle_device_key_keyring_backup, revoke_bundle_recipient_profile, verify_bundle,
-    write_bundle_file_with_encryption, write_bundle_recipient_file,
+    read_bundle_recipient_inventory_file, restore_bundle_device_key_keyring_backup,
+    revoke_bundle_recipient_profile, verify_bundle, write_bundle_file_with_encryption,
+    write_bundle_recipient_file, write_bundle_recipient_inventory_file,
 };
 use agent_sync_core::DeviceSnapshot;
 use agent_sync_scan::{ScanOptions, scan_device as scan_device_core};
 use agent_sync_storage::{AgentSyncStore, StoredRecord};
 use agent_sync_transform::{SnapshotDiff, TransformPlan, create_transform_plan, diff_snapshots};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 #[tauri::command]
@@ -586,6 +589,42 @@ fn bundle_recipient_rotation_plan_command(
 }
 
 #[tauri::command]
+fn export_bundle_recipient_inventory_file(
+    db_path: String,
+    output: String,
+    source_label: Option<String>,
+    include_revoked: Option<bool>,
+) -> Result<BundleRecipientInventory, String> {
+    let profiles = list_bundle_recipient_profiles(db_path)?;
+    let inventory = create_bundle_recipient_inventory(
+        &profiles,
+        source_label,
+        include_revoked.unwrap_or(false),
+    );
+    write_bundle_recipient_inventory_file(&inventory, output).map_err(|error| error.to_string())?;
+    Ok(inventory)
+}
+
+#[tauri::command]
+fn import_bundle_recipient_inventory_file(
+    db_path: String,
+    input: String,
+    include_revoked: Option<bool>,
+) -> Result<BundleRecipientInventoryImportReport, String> {
+    let inventory =
+        read_bundle_recipient_inventory_file(input).map_err(|error| error.to_string())?;
+    let profiles = list_bundle_recipient_profiles(db_path.clone())?;
+    let store = AgentSyncStore::open(db_path).map_err(|error| error.to_string())?;
+    import_bundle_recipient_inventory_into_store(
+        &store,
+        &profiles,
+        &inventory,
+        include_revoked.unwrap_or(false),
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn revoke_bundle_recipient_profile_command(
     db_path: String,
     id: String,
@@ -602,6 +641,52 @@ fn revoke_bundle_recipient_profile_command(
         .save_json(BUNDLE_RECIPIENT_PROFILE_KIND, Some(revoked.id), &revoked)
         .map_err(|error| error.to_string())?;
     Ok(revoked)
+}
+
+fn import_bundle_recipient_inventory_into_store(
+    store: &AgentSyncStore,
+    existing: &[BundleRecipientProfile],
+    inventory: &BundleRecipientInventory,
+    include_revoked: bool,
+) -> Result<BundleRecipientInventoryImportReport, String> {
+    let mut known = existing
+        .iter()
+        .map(|profile| profile.age_recipient.clone())
+        .collect::<HashSet<_>>();
+    let mut imported_profiles = Vec::new();
+    let mut skipped = Vec::new();
+    for profile in &inventory.profiles {
+        if profile.revoked && !include_revoked {
+            skipped.push(BundleRecipientInventorySkip {
+                age_recipient: profile.age_recipient.clone(),
+                label: profile.label.clone(),
+                reason: "revoked profile skipped; enable include revoked to preserve revoked inventory records".to_string(),
+            });
+            continue;
+        }
+        if known.contains(&profile.age_recipient) {
+            skipped.push(BundleRecipientInventorySkip {
+                age_recipient: profile.age_recipient.clone(),
+                label: profile.label.clone(),
+                reason: "recipient already exists in local store".to_string(),
+            });
+            continue;
+        }
+        let imported = bundle_recipient_profile_from_inventory(inventory, profile);
+        store
+            .save_json(BUNDLE_RECIPIENT_PROFILE_KIND, Some(imported.id), &imported)
+            .map_err(|error| error.to_string())?;
+        known.insert(imported.age_recipient.clone());
+        imported_profiles.push(imported);
+    }
+    Ok(BundleRecipientInventoryImportReport {
+        schema_version: "0.2".to_string(),
+        inventory_id: inventory.id,
+        imported_count: imported_profiles.len(),
+        skipped_count: skipped.len(),
+        imported_profiles,
+        skipped,
+    })
 }
 
 fn nonempty(value: Option<String>) -> Option<String> {
@@ -721,6 +806,8 @@ pub fn run() {
             save_bundle_recipient_profile,
             list_bundle_recipient_profiles,
             bundle_recipient_rotation_plan_command,
+            export_bundle_recipient_inventory_file,
+            import_bundle_recipient_inventory_file,
             revoke_bundle_recipient_profile_command
         ])
         .run(tauri::generate_context!())

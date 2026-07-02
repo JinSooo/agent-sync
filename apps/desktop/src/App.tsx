@@ -172,6 +172,25 @@ type BundleRecipientRotationPlan = {
   records: BundleRecipientRotationRecord[];
 };
 
+type BundleRecipientInventory = {
+  schema_version: string;
+  id: string;
+  generated_at: string;
+  source_label?: string;
+  profile_count: number;
+  digest: string;
+  profiles: BundleRecipientProfile[];
+};
+
+type BundleRecipientInventoryImportReport = {
+  schema_version: string;
+  inventory_id: string;
+  imported_count: number;
+  skipped_count: number;
+  imported_profiles: BundleRecipientProfile[];
+  skipped: Array<{ age_recipient: string; label: string; reason: string }>;
+};
+
 type PayloadEntry = {
   agent_id: string;
   portable_path: string;
@@ -471,6 +490,9 @@ export function App() {
   const [recipientProfilePlatformHint, setRecipientProfilePlatformHint] = useState('');
   const [recipientProfileInput, setRecipientProfileInput] = useState('');
   const [recipientProfileNote, setRecipientProfileNote] = useState('');
+  const [recipientInventoryPath, setRecipientInventoryPath] = useState('agent-sync-recipient-inventory.json');
+  const [recipientInventorySourceLabel, setRecipientInventorySourceLabel] = useState('');
+  const [recipientInventoryIncludeRevoked, setRecipientInventoryIncludeRevoked] = useState(false);
   const [storeMessage, setStoreMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1041,6 +1063,23 @@ export function App() {
     if (path) setBundleKeychainBackupPath(path);
   }
 
+  async function chooseRecipientInventoryOutput() {
+    const selected = await save({
+      defaultPath: recipientInventoryPath || 'agent-sync-recipient-inventory.json',
+      filters: [{ name: 'Agent Sync Recipient Inventory', extensions: ['json'] }]
+    });
+    if (selected) setRecipientInventoryPath(selected);
+  }
+
+  async function chooseRecipientInventoryInput() {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: 'Agent Sync Recipient Inventory', extensions: ['json'] }]
+    });
+    const path = singlePath(selected);
+    if (path) setRecipientInventoryPath(path);
+  }
+
   async function generateBundleKey() {
     const selected = await save({
       defaultPath: bundleKeyPath || 'agent-sync-device-key.json',
@@ -1271,6 +1310,42 @@ export function App() {
       });
       setSelectedRecipientProfileIds((current) => current.filter((id) => id !== profile.id));
       setStoreMessage(`trusted recipient marked revoked locally: ${revoked.label}`);
+      await refreshRecipientProfiles();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportRecipientInventory() {
+    setBusy(true);
+    setError(null);
+    try {
+      const inventory = await invoke<BundleRecipientInventory>('export_bundle_recipient_inventory_file', {
+        dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
+        output: recipientInventoryPath || 'agent-sync-recipient-inventory.json',
+        sourceLabel: recipientInventorySourceLabel || undefined,
+        includeRevoked: recipientInventoryIncludeRevoked
+      });
+      setStoreMessage(`recipient inventory exported: ${inventory.profile_count} profile(s), digest ${shortText(inventory.digest, 18)}`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importRecipientInventory() {
+    setBusy(true);
+    setError(null);
+    try {
+      const report = await invoke<BundleRecipientInventoryImportReport>('import_bundle_recipient_inventory_file', {
+        dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
+        input: recipientInventoryPath || 'agent-sync-recipient-inventory.json',
+        includeRevoked: recipientInventoryIncludeRevoked
+      });
+      setStoreMessage(`recipient inventory imported: ${report.imported_count} new, ${report.skipped_count} skipped`);
       await refreshRecipientProfiles();
     } catch (err) {
       setError(String(err));
@@ -1595,6 +1670,24 @@ export function App() {
                     )}
                   </div>
                 )}
+                <label>
+                  Recipient inventory path
+                  <input value={recipientInventoryPath} onChange={(event) => setRecipientInventoryPath(event.target.value)} placeholder="agent-sync-recipient-inventory.json" />
+                </label>
+                <label>
+                  Inventory source label
+                  <input value={recipientInventorySourceLabel} onChange={(event) => setRecipientInventorySourceLabel(event.target.value)} placeholder="MacBook Pro / Windows desktop / WSL dev box" />
+                </label>
+                <label className="inlineCheck">
+                  <input type="checkbox" checked={recipientInventoryIncludeRevoked} onChange={(event) => setRecipientInventoryIncludeRevoked(event.target.checked)} />
+                  Include revoked profiles when exporting or importing recipient inventory.
+                </label>
+                <div className="chips">
+                  <button className="secondary" onClick={chooseRecipientInventoryOutput} disabled={busy}>Choose inventory output…</button>
+                  <button className="secondary" onClick={chooseRecipientInventoryInput} disabled={busy}>Choose inventory input…</button>
+                  <button className="secondary" onClick={exportRecipientInventory} disabled={busy}>Export public recipient inventory</button>
+                  <button className="secondary" onClick={importRecipientInventory} disabled={busy}>Import public recipient inventory</button>
+                </div>
                 <label>
                   Trusted recipient label
                   <input value={recipientProfileLabel} onChange={(event) => setRecipientProfileLabel(event.target.value)} placeholder="Windows desktop / MacBook Pro / WSL dev box" />

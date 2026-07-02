@@ -26,6 +26,7 @@ The older Node CLI remains available as a legacy reference while the Rust/Tauri 
 - Export a verified `.asbundle` containing the source snapshot, safe text payloads, explicitly selected memory/MCP review payloads, metadata-only session archive entries, and explicitly selected raw session payloads. Sensitive memory/MCP and raw session payload export is protected with age encryption when either a passphrase, local device key file, OS keychain device key, or one/more public recipient files are provided; unencrypted sensitive export still requires an explicit acknowledgement.
 - Save trusted public-recipient profiles with label/device/platform notes in the local SQLite store, then select them visually or by CLI profile id for repeat cross-device encrypted exports. Profiles store public age recipients only; private identities stay in a key file or OS keychain.
 - Review stale trusted recipients with a rotation plan in desktop or CLI before using old remote public keys for new exports.
+- Exchange public recipient inventory files between devices so a new machine can import trusted public recipients without copying private keys. Inventory imports deduplicate by age recipient and skip revoked profiles by default.
 - Export and restore an OS keychain bundle identity through a passphrase-encrypted backup file for lost-device or machine-rebuild recovery. The backup contains the private age identity, so the file and passphrase must be stored separately.
 - Import and verify a remote `.asbundle` in the desktop UI.
 - Create a remote-to-local transform plan.
@@ -61,6 +62,8 @@ cargo run -p agent_sync_cli -- restore-bundle-keychain-backup --bundle-keychain 
 cargo run -p agent_sync_cli -- save-bundle-recipient-profile --store agent-sync-studio.sqlite --label "Windows desktop" --platform windows --recipient windows-agent-sync-recipient.json
 cargo run -p agent_sync_cli -- list-bundle-recipient-profiles --store agent-sync-studio.sqlite
 cargo run -p agent_sync_cli -- bundle-recipient-rotation-plan --store agent-sync-studio.sqlite --stale-days 90
+cargo run -p agent_sync_cli -- export-bundle-recipient-inventory --store agent-sync-studio.sqlite --output macbook-recipient-inventory.json --label "MacBook Pro"
+cargo run -p agent_sync_cli -- import-bundle-recipient-inventory --store agent-sync-studio.sqlite --input macbook-recipient-inventory.json
 cargo run -p agent_sync_cli -- revoke-bundle-recipient-profile --store agent-sync-studio.sqlite --id "PROFILE_ID" --note "remote key rotated"
 cargo run -p agent_sync_cli -- export-bundle --output agent-sync-local.asbundle
 cargo run -p agent_sync_cli -- export-bundle --output agent-sync-review.asbundle --payload "codex:~/.codex/memories/guide.md" --payload "claude:~/.claude/mcp.json" --bundle-key agent-sync-device-key.json
@@ -128,6 +131,7 @@ Automatically applicable today:
 - selected raw session payloads into native Codex/Claude file locations under a chosen target home, with strict `~/.codex/**` / `~/.claude/**` allowlisting, adapter capability gating, default Codex/Claude stopped-agent preflight, backup, optional project-path rewrite, per-session target-project override (`--session-target SESSION_ID=PROJECT_PATH` in CLI), checksum verification, and rollback from the native import journal. The UI exposes per-session target inputs plus an explicit manual stopped-agent override, and the CLI exposes `--skip-agent-stopped-check`; this does not rewrite opaque native Codex/Claude databases or secondary indexes, and the adapter capability model does not claim broad DB/index remap support until fixtures prove it.
 - local trusted recipient profile management in desktop and CLI, with label/device/platform/note metadata, repeat selection for encrypted exports, and local forget semantics. This is not remote key revocation; it is a local allowlist for public recipients.
 - stale trusted-recipient warnings, rotation playbooks, and local soft-revoke records in desktop and CLI. The plan tells you when to generate a new key on the remote device, save the new public recipient, verify a new encrypted bundle, and then mark the old profile revoked locally; it does not remotely revoke old private keys. `forget-bundle-recipient-profile` remains a hard local record delete for cleanup.
+- public trusted-recipient inventory export/import in desktop and CLI. Inventory files contain public age recipients plus local trust metadata and a digest; they are suitable for cross-device setup, but they are not private-key backups and do not prove remote ownership.
 - passphrase-encrypted OS keychain device-key backup and restore in desktop and CLI for machine rebuilds or lost-device recovery; the backup is encrypted but still contains the private age identity after decryption.
 
 See `.omx/plans/agent-sync-studio-full-architecture-20260701.md` and `docs/agent-sync-studio-architecture.md` for the full implementation architecture.

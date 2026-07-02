@@ -11,19 +11,22 @@ use agent_sync_apply::{
 };
 use agent_sync_bundle::{
     BUNDLE_RECIPIENT_PROFILE_KIND, BundleDeviceKeySummary, BundleExportOptions,
-    BundleFileDecryptionOptions, BundleFileEncryptionOptions, BundleRecipientProfile,
-    DEFAULT_BUNDLE_KEYRING_ACCOUNT, PayloadSelectionRef, bundle_recipient_from_input,
-    bundle_recipient_profile_from_input, bundle_recipient_rotation_plan,
-    delete_bundle_device_key_keyring, export_bundle, export_bundle_device_key_keyring_backup,
-    generate_bundle_device_key_file, generate_bundle_device_key_keyring, manifest_from_snapshot,
-    read_bundle_device_key_file, read_bundle_device_key_keyring, read_bundle_file_with_decryption,
-    restore_bundle_device_key_keyring_backup, revoke_bundle_recipient_profile, verify_bundle,
-    write_bundle_file_with_encryption, write_bundle_recipient_file,
+    BundleFileDecryptionOptions, BundleFileEncryptionOptions, BundleRecipientInventoryImportReport,
+    BundleRecipientInventorySkip, BundleRecipientProfile, DEFAULT_BUNDLE_KEYRING_ACCOUNT,
+    PayloadSelectionRef, bundle_recipient_from_input, bundle_recipient_profile_from_input,
+    bundle_recipient_profile_from_inventory, bundle_recipient_rotation_plan,
+    create_bundle_recipient_inventory, delete_bundle_device_key_keyring, export_bundle,
+    export_bundle_device_key_keyring_backup, generate_bundle_device_key_file,
+    generate_bundle_device_key_keyring, manifest_from_snapshot, read_bundle_device_key_file,
+    read_bundle_device_key_keyring, read_bundle_file_with_decryption,
+    read_bundle_recipient_inventory_file, restore_bundle_device_key_keyring_backup,
+    revoke_bundle_recipient_profile, verify_bundle, write_bundle_file_with_encryption,
+    write_bundle_recipient_file, write_bundle_recipient_inventory_file,
 };
 use agent_sync_scan::{ScanOptions, scan_device};
 use agent_sync_storage::AgentSyncStore;
 use agent_sync_transform::create_transform_plan;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::path::PathBuf;
 
@@ -131,6 +134,32 @@ fn main() -> anyhow::Result<()> {
             let profiles = load_bundle_recipient_profiles(&args)?;
             let plan = bundle_recipient_rotation_plan(&profiles, stale_after_days(&args)?);
             println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        "export-bundle-recipient-inventory" => {
+            let profiles = load_bundle_recipient_profiles(&args)?;
+            let output = value_after(&args, "--output")
+                .unwrap_or_else(|| "agent-sync-recipient-inventory.json".to_string());
+            let inventory = create_bundle_recipient_inventory(
+                &profiles,
+                value_after(&args, "--label"),
+                args.iter().any(|arg| arg == "--include-revoked"),
+            );
+            write_bundle_recipient_inventory_file(&inventory, output)?;
+            println!("{}", serde_json::to_string_pretty(&inventory)?);
+        }
+        "import-bundle-recipient-inventory" => {
+            let input = value_after(&args, "--input")
+                .unwrap_or_else(|| "agent-sync-recipient-inventory.json".to_string());
+            let inventory = read_bundle_recipient_inventory_file(input)?;
+            let store = AgentSyncStore::open(store_path(&args))?;
+            let existing = load_bundle_recipient_profiles(&args)?;
+            let report = import_bundle_recipient_inventory_into_store(
+                &store,
+                &existing,
+                &inventory,
+                args.iter().any(|arg| arg == "--include-revoked"),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "revoke-bundle-recipient-profile" => {
             let id = value_after(&args, "--id")
@@ -361,7 +390,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|generate-bundle-keychain|export-bundle-recipient|export-bundle-keychain-recipient|forget-bundle-keychain|export-bundle-keychain-backup|restore-bundle-keychain-backup|save-bundle-recipient-profile|list-bundle-recipient-profiles|bundle-recipient-rotation-plan|revoke-bundle-recipient-profile|forget-bundle-recipient-profile|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|dry-run-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--store PATH] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH|--bundle-keychain ACCOUNT|--bundle-recipient AGE_OR_JSON|--bundle-recipient-profile PROFILE_ID --allow-unencrypted-sensitive-payloads] [--backup-passphrase PASSPHRASE] [--stale-days N] [--id PROFILE_ID --note TEXT] [--target-home PATH --target-project PATH --session-target SESSION_ID=PROJECT_PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
+                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|generate-bundle-keychain|export-bundle-recipient|export-bundle-keychain-recipient|forget-bundle-keychain|export-bundle-keychain-backup|restore-bundle-keychain-backup|save-bundle-recipient-profile|list-bundle-recipient-profiles|bundle-recipient-rotation-plan|export-bundle-recipient-inventory|import-bundle-recipient-inventory|revoke-bundle-recipient-profile|forget-bundle-recipient-profile|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|dry-run-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--store PATH] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH|--bundle-keychain ACCOUNT|--bundle-recipient AGE_OR_JSON|--bundle-recipient-profile PROFILE_ID --allow-unencrypted-sensitive-payloads] [--backup-passphrase PASSPHRASE] [--stale-days N --include-revoked] [--id PROFILE_ID --note TEXT --label TEXT] [--target-home PATH --target-project PATH --session-target SESSION_ID=PROJECT_PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
             );
             std::process::exit(2);
         }
@@ -565,6 +594,50 @@ fn load_bundle_recipient_profiles(args: &[String]) -> anyhow::Result<Vec<BundleR
     rows.into_iter()
         .map(|row| serde_json::from_str(&row.json).map_err(Into::into))
         .collect()
+}
+
+fn import_bundle_recipient_inventory_into_store(
+    store: &AgentSyncStore,
+    existing: &[BundleRecipientProfile],
+    inventory: &agent_sync_bundle::BundleRecipientInventory,
+    include_revoked: bool,
+) -> anyhow::Result<BundleRecipientInventoryImportReport> {
+    let mut known = existing
+        .iter()
+        .map(|profile| profile.age_recipient.clone())
+        .collect::<HashSet<_>>();
+    let mut imported_profiles = Vec::new();
+    let mut skipped = Vec::new();
+    for profile in &inventory.profiles {
+        if profile.revoked && !include_revoked {
+            skipped.push(BundleRecipientInventorySkip {
+                age_recipient: profile.age_recipient.clone(),
+                label: profile.label.clone(),
+                reason: "revoked profile skipped; pass --include-revoked to preserve revoked inventory records".to_string(),
+            });
+            continue;
+        }
+        if known.contains(&profile.age_recipient) {
+            skipped.push(BundleRecipientInventorySkip {
+                age_recipient: profile.age_recipient.clone(),
+                label: profile.label.clone(),
+                reason: "recipient already exists in local store".to_string(),
+            });
+            continue;
+        }
+        let imported = bundle_recipient_profile_from_inventory(inventory, profile);
+        store.save_json(BUNDLE_RECIPIENT_PROFILE_KIND, Some(imported.id), &imported)?;
+        known.insert(imported.age_recipient.clone());
+        imported_profiles.push(imported);
+    }
+    Ok(BundleRecipientInventoryImportReport {
+        schema_version: "0.2".to_string(),
+        inventory_id: inventory.id,
+        imported_count: imported_profiles.len(),
+        skipped_count: skipped.len(),
+        imported_profiles,
+        skipped,
+    })
 }
 
 fn selected_session_ids_or_all(
