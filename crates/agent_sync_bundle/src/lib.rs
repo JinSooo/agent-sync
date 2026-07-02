@@ -35,6 +35,12 @@ pub struct PayloadEntry {
     pub base64_content: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PayloadSelectionRef {
+    pub agent_id: String,
+    pub portable_path: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionArchiveEntry {
     pub agent_id: String,
@@ -73,6 +79,7 @@ pub struct BundleExportOptions {
     pub home: PathBuf,
     pub project: PathBuf,
     pub max_payload_bytes: u64,
+    pub selected_review_payloads: Vec<PayloadSelectionRef>,
     pub include_session_payloads: bool,
     pub selected_session_ids: Vec<String>,
     pub max_session_payload_bytes: u64,
@@ -98,7 +105,12 @@ pub fn export_bundle(
     snapshot: &DeviceSnapshot,
     options: &BundleExportOptions,
 ) -> std::io::Result<SyncBundle> {
-    let manifest = manifest_from_snapshot(snapshot);
+    let mut manifest = manifest_from_snapshot(snapshot);
+    for selection in &mut manifest.selections {
+        if is_explicit_review_payload(selection, &options.selected_review_payloads) {
+            selection.include_payload = true;
+        }
+    }
     let mut payloads = Vec::new();
     for selection in &manifest.selections {
         if !selection.include_payload {
@@ -194,6 +206,18 @@ fn classify_export_entries(snapshot: &DeviceSnapshot) -> (Vec<SelectionRef>, Vec
         }
     }
     (selections, redactions)
+}
+
+fn is_explicit_review_payload(
+    selection: &SelectionRef,
+    selected_review_payloads: &[PayloadSelectionRef],
+) -> bool {
+    matches!(
+        selection.safety_class,
+        SafetyClass::McpConfig | SafetyClass::MemoryKnowledge
+    ) && selected_review_payloads.iter().any(|selected| {
+        selected.agent_id == selection.agent_id && selected.portable_path == selection.portable_path
+    })
 }
 
 fn session_archives_from_snapshot(
@@ -392,6 +416,7 @@ mod tests {
                 home: root.join("home"),
                 project: project.clone(),
                 max_payload_bytes: 1024,
+                selected_review_payloads: vec![],
                 include_session_payloads: false,
                 selected_session_ids: vec![],
                 max_session_payload_bytes: 1024,
@@ -472,6 +497,7 @@ mod tests {
                 home: home.clone(),
                 project: project.clone(),
                 max_payload_bytes: 1024,
+                selected_review_payloads: vec![],
                 include_session_payloads: false,
                 selected_session_ids: vec!["codex:session-1".into()],
                 max_session_payload_bytes: 1024,
@@ -487,6 +513,7 @@ mod tests {
                 home,
                 project,
                 max_payload_bytes: 1024,
+                selected_review_payloads: vec![],
                 include_session_payloads: true,
                 selected_session_ids: vec!["codex:session-1".into()],
                 max_session_payload_bytes: 1024,
@@ -495,6 +522,98 @@ mod tests {
         .unwrap();
         assert!(with_payload.session_archives[0].payload_included);
         assert_eq!(with_payload.session_archives[0].payloads.len(), 1);
+        assert!(verify_bundle(&with_payload).is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn includes_selected_review_payloads_only_when_explicit() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-sync-review-payload-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let home = root.join("home");
+        let project = root.join("project");
+        let memory_path = home.join(".codex").join("memories").join("guide.md");
+        fs::create_dir_all(memory_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(&memory_path, "# useful memory\n").unwrap();
+        let snapshot = DeviceSnapshot {
+            schema_version: "0.2".into(),
+            id: Uuid::new_v4(),
+            generated_at: Utc::now(),
+            platform: PlatformInfo {
+                os: "test".into(),
+                arch: "test".into(),
+            },
+            inputs: SnapshotInputs {
+                home: "~".into(),
+                project: project.display().to_string(),
+                max_depth: 4,
+                max_entries: 10,
+            },
+            summary: SnapshotSummary::default(),
+            projects: vec![],
+            agents: vec![AgentSnapshot {
+                id: "codex".into(),
+                name: "Codex".into(),
+                detected: true,
+                roots: vec![],
+                findings: vec![Finding {
+                    path: memory_path.display().to_string(),
+                    portable_path: "~/.codex/memories/guide.md".into(),
+                    kind: FileKind::File,
+                    depth: 0,
+                    size: Some(16),
+                    mtime: None,
+                    safety_class: SafetyClass::MemoryKnowledge,
+                    risk: RiskLevel::MediumHigh,
+                    reason: "test".into(),
+                    recommendation: "review".into(),
+                    truncated: false,
+                }],
+                sessions: vec![],
+            }],
+        };
+
+        let metadata_only = export_bundle(
+            &snapshot,
+            &BundleExportOptions {
+                home: home.clone(),
+                project: project.clone(),
+                max_payload_bytes: 1024,
+                selected_review_payloads: vec![],
+                include_session_payloads: false,
+                selected_session_ids: vec![],
+                max_session_payload_bytes: 1024,
+            },
+        )
+        .unwrap();
+        assert!(metadata_only.payloads.is_empty());
+        assert!(!metadata_only.manifest.selections[0].include_payload);
+
+        let with_payload = export_bundle(
+            &snapshot,
+            &BundleExportOptions {
+                home,
+                project,
+                max_payload_bytes: 1024,
+                selected_review_payloads: vec![PayloadSelectionRef {
+                    agent_id: "codex".into(),
+                    portable_path: "~/.codex/memories/guide.md".into(),
+                }],
+                include_session_payloads: false,
+                selected_session_ids: vec![],
+                max_session_payload_bytes: 1024,
+            },
+        )
+        .unwrap();
+        assert!(with_payload.manifest.selections[0].include_payload);
+        assert_eq!(with_payload.payloads.len(), 1);
+        assert_eq!(
+            with_payload.payloads[0].portable_path,
+            "~/.codex/memories/guide.md"
+        );
         assert!(verify_bundle(&with_payload).is_empty());
         let _ = fs::remove_dir_all(root);
     }

@@ -1,13 +1,13 @@
 use agent_sync_apply::{
-    ApplyContext, OperationJournal, PreflightReport, SessionArchiveImportJournal,
-    SessionArchiveImportOptions, SessionNativeFileImportJournal, SessionNativeFileImportOptions,
-    SessionNativeImportStageJournal, SessionNativeImportStageOptions, apply_safe_payloads,
-    create_journal, import_session_archives, import_session_payloads_to_native_files, preflight,
-    stage_session_native_import,
+    ApplyContext, ApplyPayloadOptions, OperationJournal, PreflightReport,
+    SessionArchiveImportJournal, SessionArchiveImportOptions, SessionNativeFileImportJournal,
+    SessionNativeFileImportOptions, SessionNativeImportStageJournal,
+    SessionNativeImportStageOptions, apply_payloads, create_journal, import_session_archives,
+    import_session_payloads_to_native_files, preflight, stage_session_native_import,
 };
 use agent_sync_bundle::{
-    BundleExportOptions, SyncBundle, SyncBundleManifest, export_bundle, manifest_from_snapshot,
-    read_bundle_file, verify_bundle, write_bundle_file,
+    BundleExportOptions, PayloadSelectionRef, SyncBundle, SyncBundleManifest, export_bundle,
+    manifest_from_snapshot, read_bundle_file, verify_bundle, write_bundle_file,
 };
 use agent_sync_core::DeviceSnapshot;
 use agent_sync_scan::{ScanOptions, scan_device as scan_device_core};
@@ -69,6 +69,7 @@ fn export_bundle_file(
     project: Option<String>,
     output: String,
     max_payload_bytes: Option<u64>,
+    selected_review_payloads: Option<Vec<PayloadSelectionRef>>,
     include_session_payloads: Option<bool>,
     selected_session_ids: Option<Vec<String>>,
     max_session_payload_bytes: Option<u64>,
@@ -87,6 +88,7 @@ fn export_bundle_file(
             home,
             project,
             max_payload_bytes: max_payload_bytes.unwrap_or(1024 * 1024),
+            selected_review_payloads: selected_review_payloads.unwrap_or_default(),
             include_session_payloads: include_session_payloads.unwrap_or(false),
             selected_session_ids: selected_session_ids.unwrap_or_default(),
             max_session_payload_bytes: max_session_payload_bytes.unwrap_or(2 * 1024 * 1024),
@@ -124,6 +126,7 @@ fn apply_safe_payloads_command(
     target_home: Option<String>,
     target_project: Option<String>,
     backup_dir: String,
+    acknowledge_review_required: Option<bool>,
 ) -> Result<OperationJournal, String> {
     let target_home = target_home
         .map(PathBuf::from)
@@ -133,13 +136,16 @@ fn apply_safe_payloads_command(
         Some(project) => PathBuf::from(project),
         None => std::env::current_dir().map_err(|error| error.to_string())?,
     };
-    apply_safe_payloads(
+    apply_payloads(
         &bundle,
         &plan,
         &ApplyContext {
             target_home,
             target_project,
             backup_dir: PathBuf::from(backup_dir),
+        },
+        &ApplyPayloadOptions {
+            acknowledge_review_required: acknowledge_review_required.unwrap_or(false),
         },
     )
     .map_err(|error| error.to_string())

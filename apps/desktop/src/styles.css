@@ -79,3 +79,5 @@ input:focus { border-color: rgba(110,231,255,.55); box-shadow: 0 0 0 3px rgba(11
 .smallButton { padding: 8px 10px; font-size: 12px; }
 .operationTable.compact { max-height: 300px; }
 .operationList ul { margin: 8px 0 12px; padding-left: 18px; color: #8ea0b8; }
+.ackBox { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; align-items: flex-start; padding: 13px; border-radius: 15px; color: #fde68a; background: rgba(245,158,11,.10); border: 1px solid rgba(245,158,11,.24); }
+.ackBox input { width: 16px; height: 16px; margin-top: 2px; }

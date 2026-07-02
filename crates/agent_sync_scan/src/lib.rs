@@ -244,9 +244,9 @@ fn finding_record(
     } else {
         FileKind::Other
     };
-    let classification = classify_path(path, &kind, agent_id);
     let mtime = metadata.modified().ok().map(DateTime::<Utc>::from);
     let portable = portable_path(path, &options.home, &options.project);
+    let classification = classify_path(Path::new(&portable), &kind, agent_id);
     Finding {
         path: portable.clone(),
         portable_path: portable,
@@ -357,8 +357,14 @@ mod tests {
         let project = temp.join("project");
         fs::create_dir_all(home.join(".codex")).unwrap();
         fs::create_dir_all(home.join(".codex").join("sessions")).unwrap();
+        fs::create_dir_all(home.join(".codex").join("memories")).unwrap();
         fs::create_dir_all(project.join(".claude")).unwrap();
         fs::write(home.join(".codex").join("sessions").join("s1.json"), "{}").unwrap();
+        fs::write(
+            home.join(".codex").join("memories").join("guide.md"),
+            "# memory",
+        )
+        .unwrap();
         fs::write(project.join("AGENTS.md"), "instructions").unwrap();
         fs::write(project.join("CLAUDE.md"), "instructions").unwrap();
         let snapshot = scan_device(ScanOptions::new(home, project)).unwrap();
@@ -385,6 +391,10 @@ mod tests {
             codex.sessions[0].source_project,
             Some(snapshot.projects[0].id)
         );
+        assert!(codex.findings.iter().any(|finding| {
+            finding.portable_path == "~/.codex/memories/guide.md"
+                && finding.safety_class == agent_sync_core::SafetyClass::MemoryKnowledge
+        }));
         let _ = fs::remove_dir_all(temp);
     }
 }

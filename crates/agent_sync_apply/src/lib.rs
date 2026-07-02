@@ -78,6 +78,11 @@ pub struct ApplyContext {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApplyPayloadOptions {
+    pub acknowledge_review_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionArchiveImportOptions {
     pub selected_session_ids: Vec<String>,
     pub target_project: Option<String>,
@@ -650,6 +655,22 @@ pub fn apply_safe_payloads(
     plan: &TransformPlan,
     context: &ApplyContext,
 ) -> std::io::Result<OperationJournal> {
+    apply_payloads(
+        bundle,
+        plan,
+        context,
+        &ApplyPayloadOptions {
+            acknowledge_review_required: false,
+        },
+    )
+}
+
+pub fn apply_payloads(
+    bundle: &SyncBundle,
+    plan: &TransformPlan,
+    context: &ApplyContext,
+    options: &ApplyPayloadOptions,
+) -> std::io::Result<OperationJournal> {
     fs::create_dir_all(&context.backup_dir)?;
     let payloads = bundle
         .payloads
@@ -665,15 +686,11 @@ pub fn apply_safe_payloads(
     journal.status = JournalStatus::Applying;
 
     for entry in &mut journal.operations {
-        if entry.operation.requires_review
-            || entry.operation.safety_class != SafetyClass::SafeConfig
-            || !matches!(
-                entry.operation.kind,
-                ApplyOperationKind::MergeText | ApplyOperationKind::CopyFile
-            )
-        {
+        if !can_apply_payload_operation(&entry.operation, options) {
             entry.status = JournalOperationStatus::Blocked;
-            entry.message = Some("operation requires review or adapter-specific apply".to_string());
+            entry.message = Some(
+                "operation requires explicit review approval or adapter-specific apply".to_string(),
+            );
             continue;
         }
 
@@ -740,6 +757,32 @@ pub fn apply_safe_payloads(
         JournalStatus::Completed
     };
     Ok(journal)
+}
+
+fn can_apply_payload_operation(
+    operation: &agent_sync_transform::ApplyOperation,
+    options: &ApplyPayloadOptions,
+) -> bool {
+    if !operation.requires_backup {
+        return false;
+    }
+    if !matches!(
+        operation.kind,
+        ApplyOperationKind::MergeText
+            | ApplyOperationKind::CopyFile
+            | ApplyOperationKind::ImportMemory
+            | ApplyOperationKind::InstallTool
+    ) {
+        return false;
+    }
+    if !operation.requires_review {
+        return operation.safety_class == SafetyClass::SafeConfig;
+    }
+    options.acknowledge_review_required
+        && matches!(
+            operation.safety_class,
+            SafetyClass::MemoryKnowledge | SafetyClass::McpConfig
+        )
 }
 
 fn materialize_path(portable: &str, home: &Path, project: &Path) -> PathBuf {
@@ -882,6 +925,115 @@ mod tests {
             fs::read_to_string(project.join("AGENTS.md")).unwrap(),
             "new"
         );
+        assert!(backup.read_dir().unwrap().next().is_some());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn applies_review_payload_only_with_explicit_acknowledgement() {
+        let root = std::env::temp_dir().join(format!("agent-sync-review-apply-{}", Uuid::new_v4()));
+        let home = root.join("home");
+        let project = root.join("project");
+        let backup = root.join("backup");
+        let target = home.join(".codex").join("memories").join("guide.md");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(&target, "old memory").unwrap();
+        let bytes = b"new memory".to_vec();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let bundle = SyncBundle {
+            manifest: agent_sync_bundle::SyncBundleManifest {
+                schema_version: "0.2".into(),
+                id: Uuid::new_v4(),
+                created_at: Utc::now(),
+                source_snapshot: Uuid::new_v4(),
+                selections: vec![],
+                redactions: vec![],
+                encryption: agent_sync_bundle::BundleEncryptionInfo {
+                    required_for_sensitive_payloads: true,
+                    method: "none".into(),
+                },
+            },
+            source_snapshot: agent_sync_core::DeviceSnapshot {
+                schema_version: "0.2".into(),
+                id: Uuid::new_v4(),
+                generated_at: Utc::now(),
+                platform: agent_sync_core::PlatformInfo {
+                    os: "test".into(),
+                    arch: "test".into(),
+                },
+                inputs: agent_sync_core::SnapshotInputs {
+                    home: "~".into(),
+                    project: project.display().to_string(),
+                    max_depth: 1,
+                    max_entries: 10,
+                },
+                summary: agent_sync_core::SnapshotSummary::default(),
+                projects: vec![],
+                agents: vec![],
+            },
+            payloads: vec![PayloadEntry {
+                agent_id: "codex".into(),
+                portable_path: "~/.codex/memories/guide.md".into(),
+                sha256: sha,
+                base64_content: base64::engine::general_purpose::STANDARD.encode(bytes),
+            }],
+            session_archives: vec![],
+        };
+        let plan = TransformPlan {
+            id: Uuid::new_v4(),
+            generated_at: Utc::now(),
+            source_snapshot: Uuid::new_v4(),
+            target_snapshot: Uuid::new_v4(),
+            target_platform: "darwin".into(),
+            operations: vec![ApplyOperation {
+                id: Uuid::new_v4(),
+                agent_id: "codex".into(),
+                agent_name: "Codex".into(),
+                path: "~/.codex/memories/guide.md".into(),
+                kind: ApplyOperationKind::ImportMemory,
+                safety_class: SafetyClass::MemoryKnowledge,
+                risk: "medium-high".into(),
+                rationale: "test".into(),
+                change_type: ChangeType::ChangedBetweenSnapshots,
+                path_warnings: vec![],
+                requires_review: true,
+                requires_backup: true,
+            }],
+            project_mappings: vec![],
+            blocked: vec![],
+            warnings: vec![],
+            summary: TransformSummary::default(),
+        };
+        let context = ApplyContext {
+            target_home: home.clone(),
+            target_project: project,
+            backup_dir: backup.clone(),
+        };
+
+        let blocked = apply_safe_payloads(&bundle, &plan, &context).unwrap();
+        assert_eq!(blocked.status, JournalStatus::Completed);
+        assert_eq!(
+            blocked.operations[0].status,
+            JournalOperationStatus::Blocked
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "old memory");
+
+        let applied = apply_payloads(
+            &bundle,
+            &plan,
+            &context,
+            &ApplyPayloadOptions {
+                acknowledge_review_required: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(applied.status, JournalStatus::Completed);
+        assert_eq!(
+            applied.operations[0].status,
+            JournalOperationStatus::Verified
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new memory");
         assert!(backup.read_dir().unwrap().next().is_some());
         let _ = fs::remove_dir_all(root);
     }

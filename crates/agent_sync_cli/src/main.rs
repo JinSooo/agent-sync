@@ -3,8 +3,8 @@ use agent_sync_apply::{
     preflight,
 };
 use agent_sync_bundle::{
-    BundleExportOptions, export_bundle, manifest_from_snapshot, read_bundle_file, verify_bundle,
-    write_bundle_file,
+    BundleExportOptions, PayloadSelectionRef, export_bundle, manifest_from_snapshot,
+    read_bundle_file, verify_bundle, write_bundle_file,
 };
 use agent_sync_scan::{ScanOptions, scan_device};
 use agent_sync_transform::create_transform_plan;
@@ -46,6 +46,7 @@ fn main() -> anyhow::Result<()> {
                     home: options.home,
                     project: options.project,
                     max_payload_bytes: 1024 * 1024,
+                    selected_review_payloads: payload_selection_values(&args, "--payload"),
                     include_session_payloads,
                     selected_session_ids,
                     max_session_payload_bytes: 2 * 1024 * 1024,
@@ -103,7 +104,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|import-native-sessions|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--output PATH] [--input PATH] [--include-session-payloads --session SESSION_ID] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity]"
+                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|import-native-sessions|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity]"
             );
             std::process::exit(2);
         }
@@ -168,4 +169,21 @@ fn values_after(args: &[String], flag: &str) -> Vec<String> {
         }
     }
     values
+}
+
+fn payload_selection_values(args: &[String], flag: &str) -> Vec<PayloadSelectionRef> {
+    values_after(args, flag)
+        .into_iter()
+        .filter_map(|value| {
+            value
+                .split_once(':')
+                .filter(|(agent_id, portable_path)| {
+                    !agent_id.is_empty() && !portable_path.is_empty()
+                })
+                .map(|(agent_id, portable_path)| PayloadSelectionRef {
+                    agent_id: agent_id.to_string(),
+                    portable_path: portable_path.to_string(),
+                })
+        })
+        .collect()
 }

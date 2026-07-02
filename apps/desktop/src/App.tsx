@@ -109,6 +109,11 @@ type PayloadEntry = {
   base64_content: string;
 };
 
+type PayloadSelectionRef = {
+  agent_id: string;
+  portable_path: string;
+};
+
 type SessionArchiveEntry = {
   agent_id: string;
   agent_name: string;
@@ -204,9 +209,18 @@ type SessionNativeFileImportJournal = {
 
 const safetyOrder = ['safe_config', 'memory_knowledge', 'mcp_config', 'raw_session', 'executable', 'database', 'secret_bearing', 'binary_or_cache', 'unknown'];
 const autoApplyKinds = new Set(['merge_text', 'copy_file']);
+const reviewPayloadClasses = new Set(['memory_knowledge', 'mcp_config']);
 
 function isAutoApplicable(operation: ApplyOperation) {
   return !operation.requires_review && operation.safety_class === 'safe_config' && autoApplyKinds.has(operation.kind);
+}
+
+function isReviewPayloadApplicable(operation: ApplyOperation) {
+  return operation.requires_review && reviewPayloadClasses.has(operation.safety_class) && ['import_memory', 'install_tool', 'merge_text', 'copy_file'].includes(operation.kind);
+}
+
+function isSelectableOperation(operation: ApplyOperation) {
+  return isAutoApplicable(operation) || isReviewPayloadApplicable(operation);
 }
 
 export function App() {
@@ -224,6 +238,8 @@ export function App() {
   const [selectedOperationIds, setSelectedOperationIds] = useState<string[]>([]);
   const [selectedSessionIds, setSelectedSessionIds] = useState<string[]>([]);
   const [selectedLocalSessionIds, setSelectedLocalSessionIds] = useState<string[]>([]);
+  const [selectedLocalReviewPayloadKeys, setSelectedLocalReviewPayloadKeys] = useState<string[]>([]);
+  const [reviewApplyAcknowledged, setReviewApplyAcknowledged] = useState(false);
   const [storeMessage, setStoreMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -251,6 +267,7 @@ export function App() {
       setBundleManifest(null);
       setStoreMessage(null);
       setSelectedLocalSessionIds([]);
+      setSelectedLocalReviewPayloadKeys([]);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -281,6 +298,7 @@ export function App() {
         snapshot,
         output: exportPath,
         maxPayloadBytes: 1024 * 1024,
+        selectedReviewPayloads: selectedLocalReviewPayloadKeys.map(payloadKeyToSelection),
         includeSessionPayloads: selectedLocalSessionIds.length > 0,
         selectedSessionIds: selectedLocalSessionIds,
         maxSessionPayloadBytes: 2 * 1024 * 1024
@@ -348,7 +366,8 @@ export function App() {
         bundle: importedBundle,
         plan: selectedPlan,
         targetProject: targetProjectPath || undefined,
-        backupDir: backupDir || 'agent-sync-backups'
+        backupDir: backupDir || 'agent-sync-backups',
+        acknowledgeReviewRequired: reviewApplyAcknowledged
       });
       setJournal(nextJournal);
     } catch (err) {
@@ -497,12 +516,24 @@ export function App() {
     setSelectedLocalSessionIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
   }
 
+  function toggleLocalReviewPayload(key: string) {
+    setSelectedLocalReviewPayloadKeys((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key]);
+  }
+
   const agents = snapshot?.agents ?? [];
   const detected = agents.filter((agent) => agent.detected);
   const totalSessions = useMemo(() => agents.reduce((count, agent) => count + agent.sessions.length, 0), [agents]);
   const localSessions = useMemo(() => agents.flatMap((agent) => agent.sessions.map((session) => ({ agent, session }))), [agents]);
+  const localReviewPayloads = useMemo(
+    () => agents.flatMap((agent) => agent.findings
+      .filter((finding) => reviewPayloadClasses.has(finding.safety_class))
+      .map((finding) => ({ agent, finding, key: payloadSelectionKey(agent.id, finding.portable_path) }))),
+    [agents]
+  );
   const selectedOperations = useMemo(() => (plan ? plan.operations.filter((operation) => selectedOperationIds.includes(operation.id)) : []), [plan, selectedOperationIds]);
+  const selectedReviewOperations = useMemo(() => selectedOperations.filter(isReviewPayloadApplicable), [selectedOperations]);
   const autoApplicableCount = plan?.operations.filter(isAutoApplicable).length ?? 0;
+  const reviewApplicableCount = plan?.operations.filter(isReviewPayloadApplicable).length ?? 0;
   const importedSessionArchives = importedBundle?.session_archives ?? [];
   const selectedRemotePayloadCount = importedSessionArchives
     .filter((archive) => selectedSessionIds.includes(archive.session.id))
@@ -657,6 +688,35 @@ export function App() {
 
         <section className="panel">
           <div className="panelTitle">
+            <h2>Memory / MCP payloads for next bundle</h2>
+            <span>{selectedLocalReviewPayloadKeys.length}/{localReviewPayloads.length} selected for explicit review export</span>
+          </div>
+          {localReviewPayloads.length ? (
+            <div className="stack">
+              <div className="chips">
+                <button className="secondary smallButton" onClick={() => setSelectedLocalReviewPayloadKeys(localReviewPayloads.map((item) => item.key))} disabled={busy}>Select all review payloads</button>
+                <button className="secondary smallButton" onClick={() => setSelectedLocalReviewPayloadKeys([])} disabled={busy}>Clear</button>
+              </div>
+              <div className="operationTable compact">
+                {localReviewPayloads.slice(0, 160).map(({ agent, finding, key }) => (
+                  <label key={key} className="operationItem">
+                    <input type="checkbox" checked={selectedLocalReviewPayloadKeys.includes(key)} onChange={() => toggleLocalReviewPayload(key)} />
+                    <span>
+                      <strong>{agent.name}</strong> · {finding.portable_path}
+                      <small>{finding.safety_class} · {finding.risk} · payload is included only if checked before Export local bundle</small>
+                      <small>{finding.reason}</small>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <p className="empty">Scan to discover memory/rules/prompts and MCP config. These review-required payloads are never exported unless explicitly checked.</p>
+          )}
+        </section>
+
+        <section className="panel">
+          <div className="panelTitle">
             <h2>Session Library</h2>
             <span>{selectedSessionIds.length}/{importedSessionArchives.length} selected · {selectedRemotePayloadCount} payloads</span>
           </div>
@@ -733,7 +793,7 @@ export function App() {
         <section className="panel">
           <div className="panelTitle">
             <h2>Transform preview & apply</h2>
-            <span>{plan ? `${selectedOperations.length}/${plan.operations.length} selected · ${autoApplicableCount} auto-safe` : 'no plan'}</span>
+              <span>{plan ? `${selectedOperations.length}/${plan.operations.length} selected · ${autoApplicableCount} auto-safe · ${reviewApplicableCount} review-applicable` : 'no plan'}</span>
           </div>
           {plan ? (
             <div className="stack">
@@ -753,19 +813,28 @@ export function App() {
               <div className="operationTable">
                 {plan.operations.slice(0, 50).map((operation) => {
                   const auto = isAutoApplicable(operation);
+                  const review = isReviewPayloadApplicable(operation);
                   return (
-                    <label key={operation.id} className={auto ? 'operationItem' : 'operationItem disabled'}>
-                      <input type="checkbox" checked={selectedOperationIds.includes(operation.id)} disabled={!auto} onChange={() => toggleOperation(operation.id)} />
+                    <label key={operation.id} className={auto || review ? 'operationItem' : 'operationItem disabled'}>
+                      <input type="checkbox" checked={selectedOperationIds.includes(operation.id)} disabled={!isSelectableOperation(operation)} onChange={() => toggleOperation(operation.id)} />
                       <span>
                         <strong>{operation.kind}</strong> · {operation.agent_id} · {operation.path}
-                        <small>{operation.safety_class} · {auto ? 'auto-applicable with backup' : 'review/adapter required'} · {operation.rationale}</small>
+                        <small>{operation.safety_class} · {auto ? 'auto-applicable with backup' : review ? 'explicit review payload apply' : 'adapter-specific required'} · {operation.rationale}</small>
                       </span>
                     </label>
                   );
                 })}
                 {plan.operations.length === 0 && <p className="empty">No operations for this preview.</p>}
               </div>
-              <button onClick={applySelectedSafePayloads} disabled={!importedBundle || selectedOperations.length === 0 || busy}>Apply selected safe payloads</button>
+              {selectedReviewOperations.length > 0 && (
+                <label className="ackBox">
+                  <input type="checkbox" checked={reviewApplyAcknowledged} onChange={(event) => setReviewApplyAcknowledged(event.target.checked)} />
+                  I reviewed selected memory/MCP payloads and accept applying them with backup/checksum verification.
+                </label>
+              )}
+              <button onClick={applySelectedSafePayloads} disabled={!importedBundle || selectedOperations.length === 0 || busy || (selectedReviewOperations.length > 0 && !reviewApplyAcknowledged)}>
+                Apply selected payloads
+              </button>
             </div>
           ) : (
             <p className="empty">Scan this device, import a bundle, then create a remote → local transform plan.</p>
@@ -876,6 +945,18 @@ function withSelectedOperations(plan: TransformPlan, selectedIds: string[]): Tra
 function singlePath(path: string | string[] | null): string | null {
   if (Array.isArray(path)) return path[0] ?? null;
   return path;
+}
+
+function payloadSelectionKey(agentId: string, portablePath: string): string {
+  return `${encodeURIComponent(agentId)}:${encodeURIComponent(portablePath)}`;
+}
+
+function payloadKeyToSelection(key: string): PayloadSelectionRef {
+  const [agentId = '', portablePath = ''] = key.split(':');
+  return {
+    agent_id: decodeURIComponent(agentId),
+    portable_path: decodeURIComponent(portablePath)
+  };
 }
 
 function Metric({ label, value }: { label: string; value: string | number }) {
