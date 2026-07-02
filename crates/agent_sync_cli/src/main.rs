@@ -103,7 +103,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|import-native-sessions|self-plan] [--home PATH] [--project PATH] [--output PATH] [--input PATH] [--include-session-payloads --session SESSION_ID] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity]"
+                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|import-native-sessions|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--output PATH] [--input PATH] [--include-session-payloads --session SESSION_ID] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity]"
             );
             std::process::exit(2);
         }
@@ -116,6 +116,8 @@ fn default_scan_options(args: &[String]) -> ScanOptions {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     let mut project = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut max_depth = None;
+    let mut max_entries = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -127,10 +129,25 @@ fn default_scan_options(args: &[String]) -> ScanOptions {
                 project = PathBuf::from(&args[i + 1]);
                 i += 2;
             }
+            "--max-depth" if i + 1 < args.len() => {
+                max_depth = args[i + 1].parse::<usize>().ok();
+                i += 2;
+            }
+            "--max-entries" if i + 1 < args.len() => {
+                max_entries = args[i + 1].parse::<usize>().ok();
+                i += 2;
+            }
             _ => i += 1,
         }
     }
-    ScanOptions::new(home, project)
+    let mut options = ScanOptions::new(home, project);
+    if let Some(max_depth) = max_depth {
+        options.max_depth = max_depth;
+    }
+    if let Some(max_entries) = max_entries {
+        options.max_entries = max_entries;
+    }
+    options
 }
 
 fn value_after(args: &[String], flag: &str) -> Option<String> {

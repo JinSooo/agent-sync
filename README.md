@@ -43,9 +43,9 @@ cargo test --workspace
 cargo run -p agent_sync_cli -- scan
 cargo run -p agent_sync_cli -- bundle-manifest
 cargo run -p agent_sync_cli -- export-bundle --output agent-sync-local.asbundle
-cargo run -p agent_sync_cli -- export-bundle --output agent-sync-sessions.asbundle --include-session-payloads --session "codex:session-id"
+cargo run -p agent_sync_cli -- export-bundle --output agent-sync-sessions.asbundle --max-depth 8 --max-entries 5000 --include-session-payloads --session "codex:~/.codex/sessions/YYYY/MM/DD/session.jsonl"
 cargo run -p agent_sync_cli -- verify-bundle --input agent-sync-local.asbundle
-cargo run -p agent_sync_cli -- import-native-sessions --input agent-sync-sessions.asbundle --target-home "$HOME" --target-project "$PWD" --backup-dir agent-sync-backups --session "codex:session-id"
+cargo run -p agent_sync_cli -- import-native-sessions --input agent-sync-sessions.asbundle --target-home "$HOME" --target-project "$PWD" --backup-dir agent-sync-backups --session "codex:~/.codex/sessions/YYYY/MM/DD/session.jsonl"
 cargo run -p agent_sync_cli -- self-plan
 
 # Desktop frontend and app
