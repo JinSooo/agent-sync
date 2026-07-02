@@ -35,7 +35,7 @@ The older Node CLI remains available as a legacy reference while the Rust/Tauri 
 - Import selected raw session payloads into the target home as native Codex/Claude session files, limited to `~/.codex/**` and `~/.claude/**`, with backup, path rewriting, checksum journal, default stopped-agent preflight for Codex/Claude, and native-file rollback.
 - Apply selected safe payloads with backups and checksum verification.
 - Roll back apply journals and native session import journals by restoring backed-up files or removing files that did not exist before the apply/import.
-- Persist snapshots and apply journals in a local SQLite record store so rollback points survive app restarts.
+- Persist snapshots, apply journals, and native session import journals in a local SQLite record store so rollback points survive app restarts.
 
 ## Commands
 
@@ -86,7 +86,7 @@ Automatically applicable today:
 - safe text config payloads from a verified bundle, only through selected operations, with backup and checksum verification.
 - explicitly selected `memory_knowledge` and `mcp_config` text payloads from a verified bundle, only after the review-acknowledgement gate, with backup and checksum verification.
 - apply journal rollback for backup-backed changes and files created by the apply.
-- automatic apply-journal persistence into the local SQLite store, with UI loading of stored rollback points.
+- automatic apply-journal and native session import-journal persistence into the local SQLite store, with UI loading of stored rollback points.
 - metadata-only session archive records into Agent Sync Studio SQLite storage.
 - selected raw session payloads into an isolated staging directory with project-path rewrite journal.
 - selected raw session payloads into native Codex/Claude file locations under a chosen target home, with strict `~/.codex/**` / `~/.claude/**` allowlisting, adapter capability gating, default Codex/Claude stopped-agent preflight, backup, optional project-path rewrite, checksum verification, and rollback from the native import journal. The UI exposes an explicit manual override and the CLI exposes `--skip-agent-stopped-check`; this does not rewrite native Codex/Claude databases or secondary indexes, and the adapter capability model does not claim DB/index remap support until fixtures prove it.

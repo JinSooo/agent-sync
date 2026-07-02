@@ -284,6 +284,7 @@ export function App() {
   const [sessionStageJournal, setSessionStageJournal] = useState<SessionNativeImportStageJournal | null>(null);
   const [sessionNativeFileJournal, setSessionNativeFileJournal] = useState<SessionNativeFileImportJournal | null>(null);
   const [journalHistory, setJournalHistory] = useState<StoredRecord[]>([]);
+  const [sessionNativeFileJournalHistory, setSessionNativeFileJournalHistory] = useState<StoredRecord[]>([]);
   const [bundleManifest, setBundleManifest] = useState<SyncBundleManifest | null>(null);
   const [verifyErrors, setVerifyErrors] = useState<string[]>([]);
   const [selectedOperationIds, setSelectedOperationIds] = useState<string[]>([]);
@@ -509,6 +510,12 @@ export function App() {
         requireAgentsStopped
       });
       setSessionNativeFileJournal(nextJournal);
+      const id = await invoke<string>('save_session_native_file_import_journal', {
+        dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
+        journal: nextJournal
+      });
+      setStoreMessage(`native file import journal saved: ${id}`);
+      await refreshSessionNativeFileJournalHistory();
     } catch (err) {
       setError(String(err));
     } finally {
@@ -525,6 +532,12 @@ export function App() {
         journal: sessionNativeFileJournal
       });
       setSessionNativeFileJournal(nextJournal);
+      const id = await invoke<string>('save_session_native_file_import_journal', {
+        dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
+        journal: nextJournal
+      });
+      setStoreMessage(`native file import rollback journal saved: ${id}`);
+      await refreshSessionNativeFileJournalHistory();
     } catch (err) {
       setError(String(err));
     } finally {
@@ -557,6 +570,14 @@ export function App() {
     setJournalHistory(rows);
   }
 
+  async function refreshSessionNativeFileJournalHistory() {
+    const rows = await invoke<StoredRecord[]>('list_store_records', {
+      dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
+      kind: 'session_native_file_import_journal'
+    });
+    setSessionNativeFileJournalHistory(rows);
+  }
+
   async function loadJournalFromHistory(record: StoredRecord) {
     setError(null);
     try {
@@ -565,6 +586,17 @@ export function App() {
       setStoreMessage(`apply journal loaded: ${record.id}`);
     } catch (err) {
       setError(`Failed to parse stored journal ${record.id}: ${String(err)}`);
+    }
+  }
+
+  async function loadSessionNativeFileJournalFromHistory(record: StoredRecord) {
+    setError(null);
+    try {
+      const parsed = JSON.parse(record.json) as SessionNativeFileImportJournal;
+      setSessionNativeFileJournal(parsed);
+      setStoreMessage(`native file import journal loaded: ${record.id}`);
+    } catch (err) {
+      setError(`Failed to parse stored native file import journal ${record.id}: ${String(err)}`);
     }
   }
 
@@ -755,6 +787,7 @@ export function App() {
                 <input value={archiveStorePath} onChange={(event) => setArchiveStorePath(event.target.value)} placeholder="agent-sync-studio.sqlite" />
               </label>
               <button className="secondary" onClick={refreshJournalHistory} disabled={busy}>Refresh apply journals</button>
+              <button className="secondary" onClick={refreshSessionNativeFileJournalHistory} disabled={busy}>Refresh native import journals</button>
               <label>
                 Session staging directory
                 <input value={sessionStageDir} onChange={(event) => setSessionStageDir(event.target.value)} placeholder="agent-sync-session-staging" />
@@ -1111,6 +1144,27 @@ export function App() {
             </ul>
           </section>
         )}
+        <section className="panel">
+          <div className="panelTitle">
+            <h2>Native file import journal history</h2>
+            <span>{sessionNativeFileJournalHistory.length} stored in {archiveStorePath || 'agent-sync-studio.sqlite'}</span>
+          </div>
+          {sessionNativeFileJournalHistory.length ? (
+            <ul className="operationList">
+              {sessionNativeFileJournalHistory.slice(0, 20).map((record) => {
+                const summary = storedSessionNativeFileJournalSummary(record);
+                return (
+                  <li key={record.id}>
+                    <button className="secondary smallButton" onClick={() => loadSessionNativeFileJournalFromHistory(record)} disabled={busy}>Load</button>{' '}
+                    {record.id} · {summary.status} · imported {summary.imported} · records {summary.records} · updated {record.updated_at}
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="empty">Native file import journals are saved automatically after import/rollback. Refresh to load rollback points from the local SQLite store.</p>
+          )}
+        </section>
       </section>
     </main>
   );
@@ -1152,6 +1206,15 @@ function storedJournalSummary(record: StoredRecord): { status: string; operation
     return { status: journal.status, operations: journal.operations.length };
   } catch {
     return { status: 'invalid_json', operations: 0 };
+  }
+}
+
+function storedSessionNativeFileJournalSummary(record: StoredRecord): { status: string; imported: number; records: number } {
+  try {
+    const journal = JSON.parse(record.json) as SessionNativeFileImportJournal;
+    return { status: journal.status, imported: journal.imported, records: journal.records.length };
+  } catch {
+    return { status: 'invalid_json', imported: 0, records: 0 };
   }
 }
 

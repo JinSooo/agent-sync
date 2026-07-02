@@ -166,6 +166,21 @@ fn save_operation_journal(db_path: String, journal: OperationJournal) -> Result<
 }
 
 #[tauri::command]
+fn save_session_native_file_import_journal(
+    db_path: String,
+    journal: SessionNativeFileImportJournal,
+) -> Result<String, String> {
+    let store = AgentSyncStore::open(db_path).map_err(|error| error.to_string())?;
+    store
+        .save_json(
+            "session_native_file_import_journal",
+            Some(journal.id),
+            &journal,
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn import_session_archives_command(
     bundle: SyncBundle,
     db_path: String,
@@ -270,6 +285,7 @@ pub fn run() {
             apply_safe_payloads_command,
             rollback_journal_command,
             save_operation_journal,
+            save_session_native_file_import_journal,
             import_session_archives_command,
             stage_session_native_import_command,
             import_session_payloads_to_native_files_command,
