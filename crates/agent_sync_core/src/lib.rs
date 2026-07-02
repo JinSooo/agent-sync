@@ -128,9 +128,25 @@ pub struct AgentSnapshot {
     pub id: String,
     pub name: String,
     pub detected: bool,
+    #[serde(default)]
+    pub capabilities: AdapterCapabilities,
     pub roots: Vec<RootRecord>,
     pub findings: Vec<Finding>,
     pub sessions: Vec<SessionRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AdapterCapabilities {
+    pub can_export_config: bool,
+    pub can_import_config: bool,
+    pub can_export_memory: bool,
+    pub can_import_memory: bool,
+    pub can_list_sessions: bool,
+    pub can_export_sessions: bool,
+    pub can_import_sessions: bool,
+    pub can_remap_session_project: bool,
+    pub requires_app_stopped_for_session_apply: bool,
+    pub supports_transactional_apply: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

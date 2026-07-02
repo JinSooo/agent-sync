@@ -9,10 +9,24 @@ type SnapshotSummary = {
   by_risk: Record<string, number>;
 };
 
+type AdapterCapabilities = {
+  can_export_config: boolean;
+  can_import_config: boolean;
+  can_export_memory: boolean;
+  can_import_memory: boolean;
+  can_list_sessions: boolean;
+  can_export_sessions: boolean;
+  can_import_sessions: boolean;
+  can_remap_session_project: boolean;
+  requires_app_stopped_for_session_apply: boolean;
+  supports_transactional_apply: boolean;
+};
+
 type AgentSnapshot = {
   id: string;
   name: string;
   detected: boolean;
+  capabilities: AdapterCapabilities;
   findings: Array<{ portable_path: string; safety_class: string; risk: string; reason: string }>;
   sessions: SessionRecord[];
 };
@@ -25,6 +39,13 @@ type ProjectIdentity = {
   package_name?: string;
 };
 
+type SessionImportCapabilities = {
+  import_as_archive: boolean;
+  import_as_new_session: boolean;
+  identity_rewrite: boolean;
+  requires_app_stopped: boolean;
+};
+
 type SessionRecord = {
   id: string;
   agent_id: string;
@@ -32,6 +53,7 @@ type SessionRecord = {
   source_project?: string;
   visibility: string;
   content_policy: string;
+  import_capabilities?: SessionImportCapabilities;
 };
 
 type DeviceSnapshot = {
@@ -230,6 +252,25 @@ function isReviewPayloadApplicable(operation: ApplyOperation) {
 
 function isSelectableOperation(operation: ApplyOperation) {
   return isAutoApplicable(operation) || isReviewPayloadApplicable(operation);
+}
+
+function emptyCapabilities(): AdapterCapabilities {
+  return {
+    can_export_config: false,
+    can_import_config: false,
+    can_export_memory: false,
+    can_import_memory: false,
+    can_list_sessions: false,
+    can_export_sessions: false,
+    can_import_sessions: false,
+    can_remap_session_project: false,
+    requires_app_stopped_for_session_apply: false,
+    supports_transactional_apply: false
+  };
+}
+
+function hasDeclaredCapabilities(capabilities: AdapterCapabilities) {
+  return Object.values(capabilities).some(Boolean);
 }
 
 export function App() {
@@ -597,6 +638,7 @@ export function App() {
   const detected = agents.filter((agent) => agent.detected);
   const totalSessions = useMemo(() => agents.reduce((count, agent) => count + agent.sessions.length, 0), [agents]);
   const localSessions = useMemo(() => agents.flatMap((agent) => agent.sessions.map((session) => ({ agent, session }))), [agents]);
+  const exportableLocalSessions = useMemo(() => localSessions.filter(({ agent }) => agent.capabilities.can_export_sessions), [localSessions]);
   const localReviewPayloads = useMemo(
     () => agents.flatMap((agent) => agent.findings
       .filter((finding) => reviewPayloadClasses.has(finding.safety_class))
@@ -608,9 +650,28 @@ export function App() {
   const autoApplicableCount = plan?.operations.filter(isAutoApplicable).length ?? 0;
   const reviewApplicableCount = plan?.operations.filter(isReviewPayloadApplicable).length ?? 0;
   const importedSessionArchives = importedBundle?.session_archives ?? [];
-  const selectedRemotePayloadCount = importedSessionArchives
-    .filter((archive) => selectedSessionIds.includes(archive.session.id))
-    .reduce((count, archive) => count + archive.payloads.length, 0);
+  const selectedRemoteArchives = useMemo(
+    () => importedSessionArchives.filter((archive) => selectedSessionIds.includes(archive.session.id)),
+    [importedSessionArchives, selectedSessionIds]
+  );
+  const selectedRemotePayloadCount = selectedRemoteArchives.reduce((count, archive) => count + archive.payloads.length, 0);
+  const targetAgentCapabilities = (agentId: string) => (snapshot?.agents.find((agent) => agent.id === agentId)?.capabilities ?? importedBundle?.source_snapshot.agents.find((agent) => agent.id === agentId)?.capabilities ?? emptyCapabilities());
+  const selectedSessionsCanNativeImport = selectedRemoteArchives.every((archive) => {
+    const capabilities = targetAgentCapabilities(archive.agent_id);
+    return hasDeclaredCapabilities(capabilities)
+      ? capabilities.can_import_sessions
+      : (archive.session.import_capabilities?.import_as_archive ?? false);
+  });
+  const selectedSessionsRequireStopped = selectedRemoteArchives.some((archive) => {
+    const capabilities = targetAgentCapabilities(archive.agent_id);
+    return hasDeclaredCapabilities(capabilities)
+      ? capabilities.requires_app_stopped_for_session_apply
+      : (archive.session.import_capabilities?.requires_app_stopped ?? true);
+  });
+  const selectedSessionsSupportDbRemap = selectedRemoteArchives.every((archive) => {
+    const capabilities = targetAgentCapabilities(archive.agent_id);
+    return hasDeclaredCapabilities(capabilities) && capabilities.can_remap_session_project;
+  });
 
   return (
     <main className="shell">
@@ -740,16 +801,16 @@ export function App() {
           {localSessions.length ? (
             <div className="stack">
               <div className="chips">
-                <button className="secondary smallButton" onClick={() => setSelectedLocalSessionIds(localSessions.map(({ session }) => session.id))} disabled={busy}>Select all local sessions</button>
+                <button className="secondary smallButton" onClick={() => setSelectedLocalSessionIds(exportableLocalSessions.map(({ session }) => session.id))} disabled={busy}>Select exportable sessions</button>
                 <button className="secondary smallButton" onClick={() => setSelectedLocalSessionIds([])} disabled={busy}>Clear</button>
               </div>
               <div className="operationTable compact">
                 {localSessions.slice(0, 120).map(({ agent, session }) => (
                   <label key={session.id} className="operationItem">
-                    <input type="checkbox" checked={selectedLocalSessionIds.includes(session.id)} onChange={() => toggleLocalSession(session.id)} />
+                    <input type="checkbox" checked={selectedLocalSessionIds.includes(session.id)} disabled={!agent.capabilities.can_export_sessions} onChange={() => toggleLocalSession(session.id)} />
                     <span>
                       <strong>{agent.name}</strong> · {session.title ?? session.id}
-                      <small>{session.visibility} · {session.content_policy} · payload is included only if checked before Export local bundle</small>
+                      <small>{session.visibility} · {session.content_policy} · {agent.capabilities.can_export_sessions ? 'payload is included only if checked before Export local bundle' : 'adapter cannot export sessions yet'}</small>
                     </span>
                   </label>
                 ))}
@@ -813,14 +874,26 @@ export function App() {
               <button onClick={importSelectedSessionArchives} disabled={!importedBundle || selectedSessionIds.length === 0 || busy}>
                 Import selected session archives
               </button>
-              <button className="secondary" onClick={stageSelectedSessionPayloads} disabled={!importedBundle || selectedSessionIds.length === 0 || busy}>
+              {!selectedSessionsCanNativeImport && (
+                <div className="preflight fail">
+                  Selected agent adapter cannot import native sessions on this target yet.
+                </div>
+              )}
+              {!selectedSessionsSupportDbRemap && (
+                <div className="notice">
+                  Current adapter capability is native-file import only: project text paths can be rewritten, but Codex/Claude DB/index project remap is not claimed.
+                </div>
+              )}
+              <button className="secondary" onClick={stageSelectedSessionPayloads} disabled={!importedBundle || selectedSessionIds.length === 0 || busy || !selectedSessionsCanNativeImport}>
                 Stage selected native session payloads
               </button>
-              <label className="ackBox">
-                <input type="checkbox" checked={requireAgentsStopped} onChange={(event) => setRequireAgentsStopped(event.target.checked)} />
-                Require Codex/Claude to be stopped before writing native session files. Uncheck only for an explicit manual override.
-              </label>
-              <button onClick={importSelectedSessionPayloadsToNativeFiles} disabled={!importedBundle || selectedSessionIds.length === 0 || selectedRemotePayloadCount === 0 || busy}>
+              {selectedSessionsRequireStopped && (
+                <label className="ackBox">
+                  <input type="checkbox" checked={requireAgentsStopped} onChange={(event) => setRequireAgentsStopped(event.target.checked)} />
+                  Require Codex/Claude to be stopped before writing native session files. Uncheck only for an explicit manual override.
+                </label>
+              )}
+              <button onClick={importSelectedSessionPayloadsToNativeFiles} disabled={!importedBundle || selectedSessionIds.length === 0 || selectedRemotePayloadCount === 0 || busy || !selectedSessionsCanNativeImport}>
                 Import selected payloads to native files
               </button>
             </div>
@@ -838,6 +911,9 @@ export function App() {
                   <div>
                     <strong>{agent.name}</strong>
                     <small>{agent.id} · {agent.findings.length} findings · {agent.sessions.length} session surfaces</small>
+                    <small>
+                      {agent.capabilities.can_export_config ? 'config export' : 'no config export'} · {agent.capabilities.can_import_config ? 'config import' : 'no config import'} · {agent.capabilities.can_import_sessions ? 'session file import' : 'no session import'} · {agent.capabilities.can_remap_session_project ? 'DB/index remap' : 'no DB/index remap'}
+                    </small>
                   </div>
                   <span className={agent.detected ? 'status ok' : 'status'}>{agent.detected ? 'detected' : 'absent'}</span>
                 </article>

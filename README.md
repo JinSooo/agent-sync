@@ -22,15 +22,15 @@ The older Node CLI remains available as a legacy reference while the Rust/Tauri 
 
 ## What works now
 
-- Scan local Codex and Claude Code surfaces without printing file contents.
+- Scan local Codex and Claude Code surfaces without printing file contents, including adapter capabilities that drive UI availability.
 - Export a verified `.asbundle` containing the source snapshot, safe text payloads, explicitly selected memory/MCP review payloads, metadata-only session archive entries, and explicitly selected raw session payloads.
 - Import and verify a remote `.asbundle` in the desktop UI.
 - Create a remote-to-local transform plan.
-- Show project mapping confidence by normalized git remote, directory basename, or manual fallback.
+- Show project mapping confidence by normalized git remote, directory basename, or manual fallback, while clearly warning when the adapter does not support DB/index-level project remap.
 - Select auto-safe operations visually.
 - Choose memory/rules/prompts and MCP config payloads for explicit review export, then apply selected review payloads only after an acknowledgement gate.
-- Choose local Codex/Claude sessions whose raw payloads should be included in the next bundle.
-- Choose remote Codex/Claude session archives and import them into the local Agent Sync Studio archive store with target-project mapping.
+- Choose local Codex/Claude sessions whose raw payloads should be included in the next bundle, gated by adapter export capability.
+- Choose remote Codex/Claude session archives and import them into the local Agent Sync Studio archive store with target-project mapping; native-file actions are gated by adapter import capability.
 - Stage selected raw session payloads into an isolated native-import directory with optional source-project to target-project path rewriting.
 - Import selected raw session payloads into the target home as native Codex/Claude session files, limited to `~/.codex/**` and `~/.claude/**`, with backup, path rewriting, checksum journal, default stopped-agent preflight for Codex/Claude, and native-file rollback.
 - Apply selected safe payloads with backups and checksum verification.
@@ -89,6 +89,6 @@ Automatically applicable today:
 - automatic apply-journal persistence into the local SQLite store, with UI loading of stored rollback points.
 - metadata-only session archive records into Agent Sync Studio SQLite storage.
 - selected raw session payloads into an isolated staging directory with project-path rewrite journal.
-- selected raw session payloads into native Codex/Claude file locations under a chosen target home, with strict `~/.codex/**` / `~/.claude/**` allowlisting, default Codex/Claude stopped-agent preflight, backup, optional project-path rewrite, checksum verification, and rollback from the native import journal. The UI exposes an explicit manual override and the CLI exposes `--skip-agent-stopped-check`; this does not rewrite native Codex/Claude databases or secondary indexes.
+- selected raw session payloads into native Codex/Claude file locations under a chosen target home, with strict `~/.codex/**` / `~/.claude/**` allowlisting, adapter capability gating, default Codex/Claude stopped-agent preflight, backup, optional project-path rewrite, checksum verification, and rollback from the native import journal. The UI exposes an explicit manual override and the CLI exposes `--skip-agent-stopped-check`; this does not rewrite native Codex/Claude databases or secondary indexes, and the adapter capability model does not claim DB/index remap support until fixtures prove it.
 
 See `.omx/plans/agent-sync-studio-full-architecture-20260701.md` and `docs/agent-sync-studio-architecture.md` for the full implementation architecture.

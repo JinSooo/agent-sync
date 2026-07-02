@@ -1,6 +1,7 @@
 use agent_sync_core::{
-    AgentSnapshot, DeviceSnapshot, FileKind, Finding, PlatformInfo, ProjectIdentity, RootRecord,
-    SessionRecord, SnapshotInputs, SnapshotSummary, classify_path, portable_path,
+    AdapterCapabilities, AgentSnapshot, DeviceSnapshot, FileKind, Finding, PlatformInfo,
+    ProjectIdentity, RootRecord, SessionRecord, SnapshotInputs, SnapshotSummary, classify_path,
+    portable_path,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -40,6 +41,7 @@ struct AgentSurface {
     id: &'static str,
     name: &'static str,
     roots: &'static [SurfaceRoot],
+    capabilities: AdapterCapabilities,
 }
 
 const CODEX_ROOTS: &[SurfaceRoot] = &[
@@ -80,16 +82,33 @@ const CLAUDE_ROOTS: &[SurfaceRoot] = &[
     },
 ];
 
+const fn default_supported_capabilities() -> AdapterCapabilities {
+    AdapterCapabilities {
+        can_export_config: true,
+        can_import_config: true,
+        can_export_memory: true,
+        can_import_memory: true,
+        can_list_sessions: true,
+        can_export_sessions: true,
+        can_import_sessions: true,
+        can_remap_session_project: false,
+        requires_app_stopped_for_session_apply: true,
+        supports_transactional_apply: false,
+    }
+}
+
 const SURFACES: &[AgentSurface] = &[
     AgentSurface {
         id: "codex",
         name: "OpenAI Codex",
         roots: CODEX_ROOTS,
+        capabilities: default_supported_capabilities(),
     },
     AgentSurface {
         id: "claude",
         name: "Claude Code",
         roots: CLAUDE_ROOTS,
+        capabilities: default_supported_capabilities(),
     },
 ];
 
@@ -132,6 +151,7 @@ fn scan_agent(
         id: surface.id.to_string(),
         name: surface.name.to_string(),
         detected: false,
+        capabilities: surface.capabilities.clone(),
         roots: Vec::new(),
         findings: Vec::new(),
         sessions: Vec::new(),
@@ -387,6 +407,10 @@ mod tests {
             .find(|agent| agent.id == "codex")
             .unwrap();
         assert_eq!(codex.sessions.len(), 1);
+        assert!(codex.capabilities.can_export_sessions);
+        assert!(codex.capabilities.can_import_sessions);
+        assert!(!codex.capabilities.can_remap_session_project);
+        assert!(codex.capabilities.requires_app_stopped_for_session_apply);
         assert_eq!(
             codex.sessions[0].source_project,
             Some(snapshot.projects[0].id)

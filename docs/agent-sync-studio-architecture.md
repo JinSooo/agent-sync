@@ -20,7 +20,7 @@ The frontend must not directly read or write `~/.codex`, `~/.claude`, raw sessio
 
 | Crate | Responsibility |
 | --- | --- |
-| `agent_sync_core` | Domain models, safety classes, path redaction, classification |
+| `agent_sync_core` | Domain models, adapter capabilities, safety classes, path redaction, classification |
 | `agent_sync_scan` | Codex/Claude surface scan and metadata-only session discovery |
 | `agent_sync_transform` | Snapshot diff, project mapping, and transform-plan generation |
 | `agent_sync_bundle` | `.asbundle` source snapshot, manifest, safe/review payload selection, redaction, and checksum handling |
@@ -59,19 +59,19 @@ Automatically applicable today:
 Implemented:
 
 - Tauri 2 desktop shell with React/Vite UI.
-- Rust scan/diff/transform/preflight/journal commands.
+- Rust scan/diff/transform/preflight/journal commands with adapter capabilities included in snapshots.
 - Real `.asbundle` JSON container with source snapshot, payload checksums, safe config payloads, explicitly selected memory/MCP review payloads, metadata-only session archive entries, explicitly selected raw session payloads, and secret redactions.
 - Local SQLite store for snapshots, apply journals, and session archive records as JSON records.
 - Safe config plus acknowledged memory/MCP review apply path with visual operation selection, backup, operation journal, checksum verification, automatic journal persistence, history loading, and journal rollback.
-- Session Library flow: choose local sessions for raw payload export; choose remote Codex/Claude session archives, bind them to the target home/project path, import metadata-only records into local Agent Sync Studio SQLite storage, stage selected raw payloads into an isolated native-import directory, or write selected payloads to native Codex/Claude session-file locations with project-path rewrite evidence, a stopped-agent preflight, and native-file rollback.
+- Session Library flow: choose export-capable local sessions for raw payload export; choose remote Codex/Claude session archives, bind them to the target home/project path, import metadata-only records into local Agent Sync Studio SQLite storage, stage selected raw payloads into an isolated native-import directory, or write selected payloads to native Codex/Claude session-file locations with project-path rewrite evidence, a stopped-agent preflight, and native-file rollback. Session native actions are gated by adapter capabilities and warn when DB/index remap is not supported.
 - Rust CLI: `scan`, `bundle-manifest`, `export-bundle`, `verify-bundle`, `import-native-sessions`, `rollback-journal`, `rollback-native-session-journal`, `self-plan`; `import-native-sessions` defaults to the stopped-agent check and exposes `--skip-agent-stopped-check` for explicit override.
 
 Implemented in the current product loop:
 
 - Native file picker flow for bundle import/export, target home, target project, staging, and backup directory.
-- Project-mapping UI with git-remote exact match, basename fallback, confidence, and manual-review warning.
+- Project-mapping UI with git-remote exact match, basename fallback, confidence, manual-review warning, and capability-visible DB/index remap limitations.
 
 Still to deepen:
-- Codex native session import/remap into Codex-owned indexes/databases; direct database/index writes remain adapter-specific future work.
-- Claude Code native session import/remap into Claude-owned indexes/databases; direct database/index writes remain adapter-specific future work.
+- Codex native session import/remap into Codex-owned indexes/databases; direct database/index writes remain adapter-specific future work and are not advertised by current capabilities.
+- Claude Code native session import/remap into Claude-owned indexes/databases; direct database/index writes remain adapter-specific future work and are not advertised by current capabilities.
 - Encrypted bundle payloads for sensitive selected content.

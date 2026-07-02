@@ -1,20 +1,5 @@
-use agent_sync_core::SessionRecord;
+use agent_sync_core::{AdapterCapabilities, SessionRecord};
 use agent_sync_scan::{ScanOptions, scan_device};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AdapterCapabilities {
-    pub can_export_config: bool,
-    pub can_import_config: bool,
-    pub can_export_memory: bool,
-    pub can_import_memory: bool,
-    pub can_list_sessions: bool,
-    pub can_export_sessions: bool,
-    pub can_import_sessions: bool,
-    pub can_remap_session_project: bool,
-    pub requires_app_stopped_for_session_apply: bool,
-    pub supports_transactional_apply: bool,
-}
 
 pub fn capabilities() -> AdapterCapabilities {
     AdapterCapabilities {
@@ -25,9 +10,9 @@ pub fn capabilities() -> AdapterCapabilities {
         can_list_sessions: true,
         can_export_sessions: true,
         can_import_sessions: true,
-        can_remap_session_project: true,
+        can_remap_session_project: false,
         requires_app_stopped_for_session_apply: true,
-        supports_transactional_apply: true,
+        supports_transactional_apply: false,
     }
 }
 
@@ -41,4 +26,18 @@ pub fn list_sessions(options: ScanOptions) -> agent_sync_core::Result<Vec<Sessio
         .find(|agent| agent.id == "claude")
         .map(|agent| agent.sessions)
         .unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capabilities_do_not_claim_db_index_remap() {
+        let capabilities = capabilities();
+        assert!(capabilities.can_import_sessions);
+        assert!(!capabilities.can_remap_session_project);
+        assert!(!capabilities.supports_transactional_apply);
+        assert!(capabilities.requires_app_stopped_for_session_apply);
+    }
 }

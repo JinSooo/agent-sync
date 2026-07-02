@@ -609,6 +609,7 @@ mod tests {
                 id: "codex".into(),
                 name: "Codex".into(),
                 detected: true,
+                capabilities: Default::default(),
                 roots: vec![RootRecord {
                     path: "~/.codex".into(),
                     scope: "home".into(),

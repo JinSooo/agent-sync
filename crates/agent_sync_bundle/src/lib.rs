@@ -357,6 +357,7 @@ mod tests {
                 id: "codex".into(),
                 name: "Codex".into(),
                 detected: true,
+                capabilities: Default::default(),
                 roots: vec![RootRecord {
                     path: "<project>/AGENTS.md".into(),
                     scope: "project".into(),
@@ -485,6 +486,7 @@ mod tests {
                 id: "codex".into(),
                 name: "Codex".into(),
                 detected: true,
+                capabilities: Default::default(),
                 roots: vec![],
                 findings: vec![],
                 sessions: vec![session],
@@ -558,6 +560,7 @@ mod tests {
                 id: "codex".into(),
                 name: "Codex".into(),
                 detected: true,
+                capabilities: Default::default(),
                 roots: vec![],
                 findings: vec![Finding {
                     path: memory_path.display().to_string(),
