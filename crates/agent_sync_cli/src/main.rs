@@ -10,14 +10,16 @@ use agent_sync_apply::{
     rollback_session_native_file_import_journal, session_native_import_readiness,
 };
 use agent_sync_bundle::{
-    BundleDeviceKeySummary, BundleExportOptions, BundleFileDecryptionOptions,
-    BundleFileEncryptionOptions, DEFAULT_BUNDLE_KEYRING_ACCOUNT, PayloadSelectionRef,
-    bundle_recipient_from_input, delete_bundle_device_key_keyring, export_bundle,
+    BUNDLE_RECIPIENT_PROFILE_KIND, BundleDeviceKeySummary, BundleExportOptions,
+    BundleFileDecryptionOptions, BundleFileEncryptionOptions, BundleRecipientProfile,
+    DEFAULT_BUNDLE_KEYRING_ACCOUNT, PayloadSelectionRef, bundle_recipient_from_input,
+    bundle_recipient_profile_from_input, delete_bundle_device_key_keyring, export_bundle,
     generate_bundle_device_key_file, generate_bundle_device_key_keyring, manifest_from_snapshot,
     read_bundle_device_key_file, read_bundle_device_key_keyring, read_bundle_file_with_decryption,
     verify_bundle, write_bundle_file_with_encryption, write_bundle_recipient_file,
 };
 use agent_sync_scan::{ScanOptions, scan_device};
+use agent_sync_storage::AgentSyncStore;
 use agent_sync_transform::create_transform_plan;
 use std::collections::BTreeMap;
 use std::env;
@@ -84,6 +86,39 @@ fn main() -> anyhow::Result<()> {
                 serde_json::json!({
                     "status": "deleted",
                     "account": account
+                })
+            );
+        }
+        "save-bundle-recipient-profile" => {
+            let store = AgentSyncStore::open(store_path(&args))?;
+            let recipient_input = value_after(&args, "--recipient")
+                .or_else(|| value_after(&args, "--bundle-recipient"))
+                .ok_or_else(|| anyhow::anyhow!("--recipient AGE_OR_JSON is required"))?;
+            let profile = bundle_recipient_profile_from_input(
+                &value_after(&args, "--label").unwrap_or_default(),
+                value_after(&args, "--device"),
+                value_after(&args, "--platform"),
+                &recipient_input,
+                value_after(&args, "--note"),
+                Some("cli".to_string()),
+            )?;
+            store.save_json(BUNDLE_RECIPIENT_PROFILE_KIND, Some(profile.id), &profile)?;
+            println!("{}", serde_json::to_string_pretty(&profile)?);
+        }
+        "list-bundle-recipient-profiles" => {
+            let profiles = load_bundle_recipient_profiles(&args)?;
+            println!("{}", serde_json::to_string_pretty(&profiles)?);
+        }
+        "forget-bundle-recipient-profile" => {
+            let id = value_after(&args, "--id")
+                .ok_or_else(|| anyhow::anyhow!("--id PROFILE_ID is required"))?;
+            let store = AgentSyncStore::open(store_path(&args))?;
+            let deleted = store.delete(BUNDLE_RECIPIENT_PROFILE_KIND, &id)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": if deleted { "deleted" } else { "not_found" },
+                    "id": id
                 })
             );
         }
@@ -291,7 +326,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|generate-bundle-keychain|export-bundle-recipient|export-bundle-keychain-recipient|forget-bundle-keychain|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|dry-run-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH|--bundle-keychain ACCOUNT|--bundle-recipient AGE_OR_JSON --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --session-target SESSION_ID=PROJECT_PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
+                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|generate-bundle-keychain|export-bundle-recipient|export-bundle-keychain-recipient|forget-bundle-keychain|save-bundle-recipient-profile|list-bundle-recipient-profiles|forget-bundle-recipient-profile|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|dry-run-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--store PATH] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH|--bundle-keychain ACCOUNT|--bundle-recipient AGE_OR_JSON|--bundle-recipient-profile PROFILE_ID --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --session-target SESSION_ID=PROJECT_PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
             );
             std::process::exit(2);
         }
@@ -415,9 +450,22 @@ fn bundle_file_encryption_options(args: &[String]) -> anyhow::Result<BundleFileE
     for input in values_after(args, "--bundle-recipient") {
         recipients.push(bundle_recipient_from_input(&input)?);
     }
+    for profile_id in values_after(args, "--bundle-recipient-profile") {
+        let profiles = load_bundle_recipient_profiles(args)?;
+        let Some(profile) = profiles
+            .iter()
+            .find(|profile| profile.id.to_string() == profile_id)
+        else {
+            anyhow::bail!("bundle recipient profile not found: {profile_id}");
+        };
+        if profile.revoked {
+            anyhow::bail!("bundle recipient profile is revoked: {profile_id}");
+        }
+        recipients.push(profile.age_recipient.clone());
+    }
     if passphrase.is_some() && !recipients.is_empty() {
         anyhow::bail!(
-            "--bundle-passphrase is mutually exclusive with --bundle-key/--bundle-keychain/--bundle-recipient"
+            "--bundle-passphrase is mutually exclusive with --bundle-key/--bundle-keychain/--bundle-recipient/--bundle-recipient-profile"
         );
     }
     Ok(BundleFileEncryptionOptions {
@@ -448,6 +496,20 @@ fn bundle_file_decryption_options(args: &[String]) -> anyhow::Result<BundleFileD
         passphrase,
         identities,
     })
+}
+
+fn store_path(args: &[String]) -> PathBuf {
+    value_after(args, "--store")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("agent-sync-studio.sqlite"))
+}
+
+fn load_bundle_recipient_profiles(args: &[String]) -> anyhow::Result<Vec<BundleRecipientProfile>> {
+    let store = AgentSyncStore::open(store_path(args))?;
+    let rows = store.list(BUNDLE_RECIPIENT_PROFILE_KIND)?;
+    rows.into_iter()
+        .map(|row| serde_json::from_str(&row.json).map_err(Into::into))
+        .collect()
 }
 
 fn selected_session_ids_or_all(

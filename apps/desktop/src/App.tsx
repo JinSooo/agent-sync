@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
 
@@ -130,6 +130,20 @@ type BundleDeviceKeySummary = {
   id: string;
   created_at: string;
   age_recipient: string;
+};
+
+type BundleRecipientProfile = {
+  schema_version: string;
+  id: string;
+  created_at: string;
+  updated_at: string;
+  label: string;
+  device_hint?: string;
+  platform_hint?: string;
+  age_recipient: string;
+  source: string;
+  note?: string;
+  revoked: boolean;
 };
 
 type PayloadEntry = {
@@ -421,6 +435,13 @@ export function App() {
   const [bundleKeyPath, setBundleKeyPath] = useState('');
   const [bundleKeychainAccount, setBundleKeychainAccount] = useState('');
   const [bundleRecipientInputs, setBundleRecipientInputs] = useState('');
+  const [recipientProfiles, setRecipientProfiles] = useState<BundleRecipientProfile[]>([]);
+  const [selectedRecipientProfileIds, setSelectedRecipientProfileIds] = useState<string[]>([]);
+  const [recipientProfileLabel, setRecipientProfileLabel] = useState('');
+  const [recipientProfileDeviceHint, setRecipientProfileDeviceHint] = useState('');
+  const [recipientProfilePlatformHint, setRecipientProfilePlatformHint] = useState('');
+  const [recipientProfileInput, setRecipientProfileInput] = useState('');
+  const [recipientProfileNote, setRecipientProfileNote] = useState('');
   const [storeMessage, setStoreMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -432,6 +453,10 @@ export function App() {
   const [archiveStorePath, setArchiveStorePath] = useState('agent-sync-studio.sqlite');
   const [sessionStageDir, setSessionStageDir] = useState('agent-sync-session-staging');
   const [requireAgentsStopped, setRequireAgentsStopped] = useState(true);
+
+  useEffect(() => {
+    void refreshRecipientProfiles();
+  }, [archiveStorePath]);
 
   async function scan() {
     setBusy(true);
@@ -458,6 +483,7 @@ export function App() {
       setSelectedLocalSessionIds([]);
       setSelectedLocalReviewPayloadKeys([]);
       setAllowUnencryptedSensitiveExport(false);
+      await refreshRecipientProfiles();
     } catch (err) {
       setError(String(err));
     } finally {
@@ -487,7 +513,10 @@ export function App() {
       const encryptionPassphrase = bundlePassphrase.length > 0 ? bundlePassphrase : undefined;
       const encryptionKeyPath = bundleKeyPath.length > 0 ? bundleKeyPath : undefined;
       const encryptionKeychainAccount = bundleKeychainAccount.trim() || undefined;
-      const encryptionRecipientInputs = bundleRecipientInputsToArray(bundleRecipientInputs);
+      const encryptionRecipientInputs = [
+        ...bundleRecipientInputsToArray(bundleRecipientInputs),
+        ...selectedRecipientProfiles.map((profile) => profile.age_recipient)
+      ];
       const manifest = await invoke<SyncBundleManifest>('export_bundle_file', {
         snapshot,
         output: exportPath,
@@ -1065,6 +1094,68 @@ export function App() {
     }
   }
 
+  async function refreshRecipientProfiles() {
+    try {
+      const profiles = await invoke<BundleRecipientProfile[]>('list_bundle_recipient_profiles', {
+        dbPath: archiveStorePath || 'agent-sync-studio.sqlite'
+      });
+      setRecipientProfiles(profiles);
+      setSelectedRecipientProfileIds((current) => current.filter((id) => profiles.some((profile) => profile.id === id && !profile.revoked)));
+    } catch (err) {
+      setError(`Failed to load trusted recipients: ${String(err)}`);
+    }
+  }
+
+  async function saveRecipientProfile() {
+    if (!recipientProfileInput.trim()) {
+      setError('Paste an age recipient or choose an agent-sync-recipient.json file before saving a trusted recipient.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const profile = await invoke<BundleRecipientProfile>('save_bundle_recipient_profile', {
+        dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
+        label: recipientProfileLabel,
+        deviceHint: recipientProfileDeviceHint || undefined,
+        platformHint: recipientProfilePlatformHint || undefined,
+        recipientInput: recipientProfileInput,
+        note: recipientProfileNote || undefined
+      });
+      setRecipientProfileLabel('');
+      setRecipientProfileDeviceHint('');
+      setRecipientProfilePlatformHint('');
+      setRecipientProfileInput('');
+      setRecipientProfileNote('');
+      setStoreMessage(`trusted recipient saved: ${profile.label}`);
+      await refreshRecipientProfiles();
+      setSelectedRecipientProfileIds((current) => current.includes(profile.id) ? current : [...current, profile.id]);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function forgetRecipientProfile(profile: BundleRecipientProfile) {
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke<boolean>('delete_store_record', {
+        dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
+        kind: 'bundle_recipient_profile',
+        id: profile.id
+      });
+      setSelectedRecipientProfileIds((current) => current.filter((id) => id !== profile.id));
+      setStoreMessage(`trusted recipient forgotten locally: ${profile.label}`);
+      await refreshRecipientProfiles();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function chooseTargetProject() {
     const selected = await open({ directory: true, multiple: false });
     const path = singlePath(selected);
@@ -1129,6 +1220,10 @@ export function App() {
     setSelectedLocalReviewPayloadKeys((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key]);
   }
 
+  function toggleRecipientProfile(id: string) {
+    setSelectedRecipientProfileIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  }
+
   function toggleNativeRemapCandidate(key: string) {
     setNativeRemapDryRun(null);
     setNativeRemapDryRunSelectionKey('');
@@ -1156,7 +1251,11 @@ export function App() {
   const bundlePassphraseProvided = bundlePassphrase.length > 0;
   const bundleKeyProvided = bundleKeyPath.length > 0;
   const bundleKeychainProvided = bundleKeychainAccount.trim().length > 0;
-  const bundleRecipientsProvided = bundleRecipientInputsToArray(bundleRecipientInputs).length > 0;
+  const selectedRecipientProfiles = useMemo(
+    () => recipientProfiles.filter((profile) => !profile.revoked && selectedRecipientProfileIds.includes(profile.id)),
+    [recipientProfiles, selectedRecipientProfileIds]
+  );
+  const bundleRecipientsProvided = bundleRecipientInputsToArray(bundleRecipientInputs).length > 0 || selectedRecipientProfiles.length > 0;
   const bundleEncryptionInputConflict = bundlePassphraseProvided && (bundleKeyProvided || bundleKeychainProvided || bundleRecipientsProvided);
   const bundleEncryptedExportSelected = bundlePassphraseProvided || bundleKeyProvided || bundleKeychainProvided || bundleRecipientsProvided;
   const selectedOperations = useMemo(() => (plan ? plan.operations.filter((operation) => selectedOperationIds.includes(operation.id)) : []), [plan, selectedOperationIds]);
@@ -1340,6 +1439,55 @@ export function App() {
                 <textarea value={bundleRecipientInputs} onChange={(event) => setBundleRecipientInputs(event.target.value)} placeholder="one age1... recipient or agent-sync-recipient.json path per line" />
               </label>
               <button className="secondary" onClick={chooseBundleRecipientPath} disabled={busy}>Choose recipient…</button>
+              <div className="stack">
+                <div className="panelTitle">
+                  <h3>Trusted recipients</h3>
+                  <span>{selectedRecipientProfiles.length}/{recipientProfiles.length} selected for export</span>
+                </div>
+                <label>
+                  Trusted recipient label
+                  <input value={recipientProfileLabel} onChange={(event) => setRecipientProfileLabel(event.target.value)} placeholder="Windows desktop / MacBook Pro / WSL dev box" />
+                </label>
+                <label>
+                  Trusted recipient value or file
+                  <textarea value={recipientProfileInput} onChange={(event) => setRecipientProfileInput(event.target.value)} placeholder="age1... or agent-sync-recipient.json path" />
+                </label>
+                <label>
+                  Device hint
+                  <input value={recipientProfileDeviceHint} onChange={(event) => setRecipientProfileDeviceHint(event.target.value)} placeholder="hostname, device owner, or machine role" />
+                </label>
+                <label>
+                  Platform hint
+                  <input value={recipientProfilePlatformHint} onChange={(event) => setRecipientProfilePlatformHint(event.target.value)} placeholder="macos / windows / wsl / linux" />
+                </label>
+                <label>
+                  Trust note
+                  <input value={recipientProfileNote} onChange={(event) => setRecipientProfileNote(event.target.value)} placeholder="why this recipient is trusted; revocation reminder" />
+                </label>
+                <div className="chips">
+                  <button className="secondary" onClick={saveRecipientProfile} disabled={busy || !recipientProfileInput.trim()}>Save trusted recipient</button>
+                  <button className="secondary" onClick={refreshRecipientProfiles} disabled={busy}>Refresh trusted recipients</button>
+                </div>
+                {recipientProfiles.length ? (
+                  <div className="operationTable compact">
+                    {recipientProfiles.slice(0, 20).map((profile) => (
+                      <label key={profile.id} className="operationItem">
+                        <input type="checkbox" checked={selectedRecipientProfileIds.includes(profile.id)} disabled={profile.revoked} onChange={() => toggleRecipientProfile(profile.id)} />
+                        <span>
+                          <strong>{profile.label}</strong> · {profile.platform_hint || 'unknown platform'} · {profile.device_hint || 'no device hint'}
+                          <small>{profile.revoked ? 'revoked' : 'trusted'} · {shortText(profile.age_recipient, 28)} · {profile.note || 'No trust note; forgetting only removes this local profile, not the remote key.'}</small>
+                          <button type="button" className="secondary dangerButton smallButton" onClick={(event) => {
+                            event.preventDefault();
+                            void forgetRecipientProfile(profile);
+                          }} disabled={busy}>Forget locally</button>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="empty">No trusted recipients saved yet. Save the other device's public recipient once, then select it for future encrypted exports.</p>
+                )}
+              </div>
               <button className="secondary" onClick={exportBundle} disabled={!snapshot || busy || bundleEncryptionInputConflict || (sensitiveLocalPayloadSelected && !bundleEncryptedExportSelected && !allowUnencryptedSensitiveExport)}>Export local bundle</button>
               <label>
                 Import bundle path
@@ -1956,6 +2104,13 @@ function bundleRecipientInputsToArray(value: string): string[] {
     .split(/[\n,;]/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function shortText(value: string, max: number): string {
+  if (value.length <= max) return value;
+  const head = value.slice(0, Math.max(4, Math.floor(max / 2)));
+  const tail = value.slice(-Math.max(4, Math.floor(max / 3)));
+  return `${head}…${tail}`;
 }
 
 function selectedSessionTargetProjectOverrides(selectedSessionIds: string[], overrides: Record<string, string>): Record<string, string> {

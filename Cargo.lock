@@ -146,6 +146,7 @@ dependencies = [
  "agent_sync_apply",
  "agent_sync_bundle",
  "agent_sync_scan",
+ "agent_sync_storage",
  "agent_sync_transform",
  "anyhow",
  "serde_json",

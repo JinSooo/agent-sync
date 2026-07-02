@@ -85,6 +85,14 @@ impl AgentSyncStore {
         })?;
         rows.collect()
     }
+
+    pub fn delete(&self, kind: &str, id: &str) -> rusqlite::Result<bool> {
+        let changed = self.conn.execute(
+            "DELETE FROM records WHERE kind = ?1 AND id = ?2",
+            params![kind, id],
+        )?;
+        Ok(changed > 0)
+    }
 }
 
 #[cfg(test)]
@@ -101,5 +109,8 @@ mod tests {
         let rows = store.list("snapshot").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, id);
+        assert!(store.delete("snapshot", &id).unwrap());
+        assert!(store.list("snapshot").unwrap().is_empty());
+        assert!(!store.delete("snapshot", &id).unwrap());
     }
 }

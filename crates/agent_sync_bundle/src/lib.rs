@@ -13,6 +13,7 @@ const BUNDLE_ENCRYPTION_METHOD_AGE_SCRYPT: &str = "age:scrypt:v1";
 const BUNDLE_ENCRYPTION_METHOD_AGE_X25519: &str = "age:x25519:v1";
 const BUNDLE_KEYRING_SERVICE: &str = "agent-sync-studio";
 pub const DEFAULT_BUNDLE_KEYRING_ACCOUNT: &str = "default-bundle-key";
+pub const BUNDLE_RECIPIENT_PROFILE_KIND: &str = "bundle_recipient_profile";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SyncBundleManifest {
@@ -96,6 +97,22 @@ pub struct BundleDeviceKeySummary {
     pub id: Uuid,
     pub created_at: DateTime<Utc>,
     pub age_recipient: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BundleRecipientProfile {
+    pub schema_version: String,
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub label: String,
+    pub device_hint: Option<String>,
+    pub platform_hint: Option<String>,
+    pub age_recipient: String,
+    pub source: String,
+    pub note: Option<String>,
+    #[serde(default)]
+    pub revoked: bool,
 }
 
 impl From<&BundleDeviceKey> for BundleDeviceKeySummary {
@@ -571,6 +588,62 @@ pub fn bundle_recipient_from_input(input: &str) -> std::io::Result<String> {
     }
 }
 
+pub fn bundle_recipient_profile_from_input(
+    label: &str,
+    device_hint: Option<String>,
+    platform_hint: Option<String>,
+    recipient_input: &str,
+    note: Option<String>,
+    source: Option<String>,
+) -> std::io::Result<BundleRecipientProfile> {
+    let age_recipient = bundle_recipient_from_input(recipient_input)?;
+    let now = Utc::now();
+    let trimmed_label = label.trim();
+    let label = if trimmed_label.is_empty() {
+        format!("trusted recipient {}", short_recipient(&age_recipient))
+    } else {
+        trimmed_label.to_string()
+    };
+    Ok(BundleRecipientProfile {
+        schema_version: "0.2".to_string(),
+        id: Uuid::new_v4(),
+        created_at: now,
+        updated_at: now,
+        label,
+        device_hint: trimmed_optional(device_hint),
+        platform_hint: trimmed_optional(platform_hint),
+        age_recipient,
+        source: source
+            .and_then(|value| {
+                let value = value.trim().to_string();
+                (!value.is_empty()).then_some(value)
+            })
+            .unwrap_or_else(|| "manual".to_string()),
+        note: trimmed_optional(note),
+        revoked: false,
+    })
+}
+
+fn trimmed_optional(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim().to_string();
+        (!value.is_empty()).then_some(value)
+    })
+}
+
+fn short_recipient(recipient: &str) -> String {
+    let prefix: String = recipient.chars().take(10).collect();
+    let suffix = recipient
+        .chars()
+        .rev()
+        .take(6)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{prefix}…{suffix}")
+}
+
 #[cfg(unix)]
 fn restrict_key_file_permissions(path: impl AsRef<Path>) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -750,6 +823,29 @@ mod tests {
             "work-laptop"
         );
         assert!(normalized_keyring_account("   ").is_err());
+    }
+
+    #[test]
+    fn creates_labeled_recipient_profiles_from_age_input() {
+        let key = generate_bundle_device_key();
+        let profile = bundle_recipient_profile_from_input(
+            "Windows desktop",
+            Some(" WIN-DEV ".into()),
+            Some(" windows ".into()),
+            &key.age_recipient,
+            Some(" use for work bundles ".into()),
+            Some(" manual paste ".into()),
+        )
+        .unwrap();
+
+        assert_eq!(profile.schema_version, "0.2");
+        assert_eq!(profile.label, "Windows desktop");
+        assert_eq!(profile.device_hint.as_deref(), Some("WIN-DEV"));
+        assert_eq!(profile.platform_hint.as_deref(), Some("windows"));
+        assert_eq!(profile.age_recipient, key.age_recipient);
+        assert_eq!(profile.source, "manual paste");
+        assert_eq!(profile.note.as_deref(), Some("use for work bundles"));
+        assert!(!profile.revoked);
     }
 
     #[test]

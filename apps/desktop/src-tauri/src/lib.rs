@@ -16,9 +16,10 @@ use agent_sync_apply::{
     stage_session_native_import,
 };
 use agent_sync_bundle::{
-    BundleDeviceKeySummary, BundleExportOptions, BundleFileDecryptionOptions,
-    BundleFileEncryptionOptions, PayloadSelectionRef, SyncBundle, SyncBundleManifest,
-    bundle_recipient_from_input, delete_bundle_device_key_keyring, export_bundle,
+    BUNDLE_RECIPIENT_PROFILE_KIND, BundleDeviceKeySummary, BundleExportOptions,
+    BundleFileDecryptionOptions, BundleFileEncryptionOptions, BundleRecipientProfile,
+    PayloadSelectionRef, SyncBundle, SyncBundleManifest, bundle_recipient_from_input,
+    bundle_recipient_profile_from_input, delete_bundle_device_key_keyring, export_bundle,
     generate_bundle_device_key_file, generate_bundle_device_key_keyring, manifest_from_snapshot,
     read_bundle_device_key_file, read_bundle_device_key_keyring, read_bundle_file_with_decryption,
     verify_bundle, write_bundle_file_with_encryption, write_bundle_recipient_file,
@@ -507,6 +508,48 @@ fn list_store_records(db_path: String, kind: String) -> Result<Vec<StoredRecord>
     store.list(&kind).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn delete_store_record(db_path: String, kind: String, id: String) -> Result<bool, String> {
+    let store = AgentSyncStore::open(db_path).map_err(|error| error.to_string())?;
+    store.delete(&kind, &id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn save_bundle_recipient_profile(
+    db_path: String,
+    label: String,
+    device_hint: Option<String>,
+    platform_hint: Option<String>,
+    recipient_input: String,
+    note: Option<String>,
+) -> Result<BundleRecipientProfile, String> {
+    let profile = bundle_recipient_profile_from_input(
+        &label,
+        device_hint,
+        platform_hint,
+        &recipient_input,
+        note,
+        Some("desktop".to_string()),
+    )
+    .map_err(|error| error.to_string())?;
+    let store = AgentSyncStore::open(db_path).map_err(|error| error.to_string())?;
+    store
+        .save_json(BUNDLE_RECIPIENT_PROFILE_KIND, Some(profile.id), &profile)
+        .map_err(|error| error.to_string())?;
+    Ok(profile)
+}
+
+#[tauri::command]
+fn list_bundle_recipient_profiles(db_path: String) -> Result<Vec<BundleRecipientProfile>, String> {
+    let store = AgentSyncStore::open(db_path).map_err(|error| error.to_string())?;
+    let rows = store
+        .list(BUNDLE_RECIPIENT_PROFILE_KIND)
+        .map_err(|error| error.to_string())?;
+    rows.into_iter()
+        .map(|row| serde_json::from_str(&row.json).map_err(|error| error.to_string()))
+        .collect()
+}
+
 fn nonempty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.is_empty())
 }
@@ -617,7 +660,10 @@ pub fn run() {
             import_session_payloads_to_native_files_command,
             rollback_session_native_file_import_journal_command,
             save_snapshot_to_store,
-            list_store_records
+            list_store_records,
+            delete_store_record,
+            save_bundle_recipient_profile,
+            list_bundle_recipient_profiles
         ])
         .run(tauri::generate_context!())
         .expect("error while running Agent Sync Studio");
