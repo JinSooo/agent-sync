@@ -1,9 +1,10 @@
 use agent_sync_apply::{
-    NativeSessionProjectRemapApplyOptions, NativeSessionProjectRemapJournal,
-    NativeSessionProjectRemapPreviewOptions, NativeSessionProjectRemapSelection,
-    NativeSessionStoreDiscoveryOptions, OperationJournal, SessionNativeFileImportJournal,
-    SessionNativeFileImportOptions, SessionNativeImportReadinessOptions,
-    apply_native_session_project_remap, create_journal, discover_native_session_stores,
+    NativeSessionProjectRemapApplyOptions, NativeSessionProjectRemapDryRunOptions,
+    NativeSessionProjectRemapJournal, NativeSessionProjectRemapPreviewOptions,
+    NativeSessionProjectRemapSelection, NativeSessionStoreDiscoveryOptions, OperationJournal,
+    SessionNativeFileImportJournal, SessionNativeFileImportOptions,
+    SessionNativeImportReadinessOptions, apply_native_session_project_remap, create_journal,
+    discover_native_session_stores, dry_run_native_session_project_remap,
     import_session_payloads_to_native_files, preflight, preview_native_session_project_remap,
     rollback_journal, rollback_native_session_project_remap_journal,
     rollback_session_native_file_import_journal, session_native_import_readiness,
@@ -181,6 +182,24 @@ fn main() -> anyhow::Result<()> {
             );
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        "dry-run-native-remap" => {
+            let options = default_scan_options(&args);
+            let snapshot = scan_device(options.clone())?;
+            let source_project = value_after(&args, "--source-project").unwrap_or_default();
+            let report = dry_run_native_session_project_remap(
+                &snapshot,
+                &NativeSessionProjectRemapDryRunOptions {
+                    target_home: options.home,
+                    target_project: options.project,
+                    source_project,
+                    selections: remap_selection_values(&args),
+                    require_agents_stopped: !args
+                        .iter()
+                        .any(|arg| arg == "--skip-agent-stopped-check"),
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         "apply-native-remap" => {
             let options = default_scan_options(&args);
             let snapshot = scan_device(options.clone())?;
@@ -272,7 +291,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|generate-bundle-keychain|export-bundle-recipient|export-bundle-keychain-recipient|forget-bundle-keychain|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH|--bundle-keychain ACCOUNT|--bundle-recipient AGE_OR_JSON --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --session-target SESSION_ID=PROJECT_PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
+                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|generate-bundle-keychain|export-bundle-recipient|export-bundle-keychain-recipient|forget-bundle-keychain|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|dry-run-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH|--bundle-keychain ACCOUNT|--bundle-recipient AGE_OR_JSON --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --session-target SESSION_ID=PROJECT_PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
             );
             std::process::exit(2);
         }

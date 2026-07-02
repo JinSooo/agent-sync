@@ -302,6 +302,29 @@ type NativeSessionProjectRemapSelection = {
   column: string;
 };
 
+type NativeSessionProjectRemapDryRunReport = {
+  id: string;
+  status: string;
+  selected: number;
+  ready: number;
+  skipped: number;
+  total_matched_rows: number;
+  blockers: string[];
+  records: Array<{
+    agent_id: string;
+    agent_name: string;
+    portable_path: string;
+    db_path: string;
+    table: string;
+    column: string;
+    source_project: string;
+    target_project: string;
+    matched_rows: number;
+    status: string;
+    message?: string;
+  }>;
+};
+
 type NativeSessionProjectRemapJournal = {
   id: string;
   status: string;
@@ -375,6 +398,8 @@ export function App() {
   const [sessionReadinessReport, setSessionReadinessReport] = useState<SessionNativeImportReadinessReport | null>(null);
   const [nativeStoreReport, setNativeStoreReport] = useState<NativeSessionStoreDiscoveryReport | null>(null);
   const [nativeRemapPreview, setNativeRemapPreview] = useState<NativeSessionProjectRemapPreviewReport | null>(null);
+  const [nativeRemapDryRun, setNativeRemapDryRun] = useState<NativeSessionProjectRemapDryRunReport | null>(null);
+  const [nativeRemapDryRunSelectionKey, setNativeRemapDryRunSelectionKey] = useState('');
   const [nativeRemapJournal, setNativeRemapJournal] = useState<NativeSessionProjectRemapJournal | null>(null);
   const [journalHistory, setJournalHistory] = useState<StoredRecord[]>([]);
   const [sessionNativeFileJournalHistory, setSessionNativeFileJournalHistory] = useState<StoredRecord[]>([]);
@@ -424,6 +449,8 @@ export function App() {
       setSessionReadinessReport(null);
       setNativeStoreReport(null);
       setNativeRemapPreview(null);
+      setNativeRemapDryRun(null);
+      setNativeRemapDryRunSelectionKey('');
       setNativeRemapJournal(null);
       setSelectedNativeRemapKeys([]);
       setBundleManifest(null);
@@ -507,6 +534,8 @@ export function App() {
       setSessionNativeFileJournal(null);
       setSessionReadinessReport(null);
       setNativeRemapPreview(null);
+      setNativeRemapDryRun(null);
+      setNativeRemapDryRunSelectionKey('');
       setNativeRemapJournal(null);
       setSelectedNativeRemapKeys([]);
     } catch (err) {
@@ -746,8 +775,37 @@ export function App() {
         maxSchemaTables: 20
       });
       setNativeRemapPreview(report);
+      setNativeRemapDryRun(null);
+      setNativeRemapDryRunSelectionKey('');
       setNativeRemapJournal(null);
       setSelectedNativeRemapKeys([]);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function dryRunNativeSessionProjectRemap() {
+    if (!snapshot) return;
+    const sourceProject = remoteSnapshot?.inputs.project;
+    if (!sourceProject) {
+      setError('Import a source bundle first so Agent Sync can count exact source-project DB remap rows.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const report = await invoke<NativeSessionProjectRemapDryRunReport>('dry_run_native_session_project_remap_command', {
+        snapshot,
+        targetHome: targetHomePath || undefined,
+        targetProject: targetProjectPath || undefined,
+        sourceProject,
+        selections: selectedNativeRemapCandidates.map(remapCandidateToSelection),
+        requireAgentsStopped
+      });
+      setNativeRemapDryRun(report);
+      setNativeRemapDryRunSelectionKey(selectedNativeRemapCandidateKey);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -760,6 +818,10 @@ export function App() {
     const sourceProject = remoteSnapshot?.inputs.project;
     if (!sourceProject) {
       setError('Import a source bundle first so Agent Sync can use its source project path for exact DB remap matching.');
+      return;
+    }
+    if (!nativeRemapDryRunCoversSelection) {
+      setError('Run a successful dry-run for the current DB remap selection before applying; this keeps the write step tied to the row-count evidence.');
       return;
     }
     setBusy(true);
@@ -1068,6 +1130,8 @@ export function App() {
   }
 
   function toggleNativeRemapCandidate(key: string) {
+    setNativeRemapDryRun(null);
+    setNativeRemapDryRunSelectionKey('');
     setSelectedNativeRemapKeys((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key]);
   }
 
@@ -1133,6 +1197,11 @@ export function App() {
   const selectedNativeRemapCandidates = useMemo(() => (
     nativeRemapPreview?.candidates.filter((candidate) => selectedNativeRemapKeys.includes(nativeRemapCandidateKey(candidate))) ?? []
   ), [nativeRemapPreview, selectedNativeRemapKeys]);
+  const selectedNativeRemapCandidateKey = useMemo(
+    () => selectedNativeRemapCandidates.map(nativeRemapCandidateKey).sort().join('|'),
+    [selectedNativeRemapCandidates]
+  );
+  const nativeRemapDryRunCoversSelection = nativeRemapDryRun?.status === 'completed' && nativeRemapDryRunSelectionKey === selectedNativeRemapCandidateKey;
 
   return (
     <main className="shell">
@@ -1561,14 +1630,42 @@ export function App() {
             {nativeRemapPreview.candidates.length ? (
               <div className="stack">
                 <div className="chips">
-                  <button className="secondary smallButton" onClick={() => setSelectedNativeRemapKeys(nativeRemapPreview.candidates.map(nativeRemapCandidateKey))} disabled={busy}>Select all candidates</button>
-                  <button className="secondary smallButton" onClick={() => setSelectedNativeRemapKeys([])} disabled={busy}>Clear</button>
-                  <button onClick={applyNativeSessionProjectRemap} disabled={!snapshot || !remoteSnapshot || selectedNativeRemapCandidates.length === 0 || busy}>
+                  <button className="secondary smallButton" onClick={() => {
+                    setNativeRemapDryRun(null);
+                    setNativeRemapDryRunSelectionKey('');
+                    setSelectedNativeRemapKeys(nativeRemapPreview.candidates.map(nativeRemapCandidateKey));
+                  }} disabled={busy}>Select all candidates</button>
+                  <button className="secondary smallButton" onClick={() => {
+                    setNativeRemapDryRun(null);
+                    setNativeRemapDryRunSelectionKey('');
+                    setSelectedNativeRemapKeys([]);
+                  }} disabled={busy}>Clear</button>
+                  <button className="secondary" onClick={dryRunNativeSessionProjectRemap} disabled={!snapshot || !remoteSnapshot || selectedNativeRemapCandidates.length === 0 || busy}>
+                    Dry-run selected DB remap
+                  </button>
+                  <button onClick={applyNativeSessionProjectRemap} disabled={!snapshot || !remoteSnapshot || selectedNativeRemapCandidates.length === 0 || !nativeRemapDryRunCoversSelection || busy}>
                     Apply selected DB remap
                   </button>
                 </div>
                 {!remoteSnapshot && (
                   <div className="notice">Import a source bundle before applying DB remap; the source bundle project path is used as the exact match value.</div>
+                )}
+                {remoteSnapshot && selectedNativeRemapCandidates.length > 0 && !nativeRemapDryRunCoversSelection && (
+                  <div className="notice">Run dry-run for the current selection first; Apply is locked until the exact row-count check succeeds.</div>
+                )}
+                {nativeRemapDryRun && (
+                  <div className={nativeRemapDryRun.status === 'completed' ? 'preflight pass' : 'preflight fail'}>
+                    DB remap dry-run: ready {nativeRemapDryRun.ready}/{nativeRemapDryRun.selected} · matched rows {nativeRemapDryRun.total_matched_rows} · skipped {nativeRemapDryRun.skipped}
+                    {nativeRemapDryRun.blockers.length > 0 && <small>{nativeRemapDryRun.blockers.join(' / ')}</small>}
+                    <ul>
+                      {nativeRemapDryRun.records.slice(0, 12).map((record) => (
+                        <li key={`${record.agent_id}:${record.portable_path}:${record.table}:${record.column}`}>
+                          {record.status} · {record.agent_name} · {record.table}.{record.column} · matched {record.matched_rows}
+                          {record.message ? ` · ${record.message}` : ''}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 )}
                 <div className="operationTable compact">
                   {nativeRemapPreview.candidates.slice(0, 80).map((candidate) => {

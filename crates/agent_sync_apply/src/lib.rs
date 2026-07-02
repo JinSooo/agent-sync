@@ -323,6 +323,44 @@ pub struct NativeSessionProjectRemapSelection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeSessionProjectRemapDryRunOptions {
+    pub target_home: PathBuf,
+    pub target_project: PathBuf,
+    pub source_project: String,
+    pub selections: Vec<NativeSessionProjectRemapSelection>,
+    pub require_agents_stopped: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeSessionProjectRemapDryRunReport {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub selected: usize,
+    pub ready: usize,
+    pub skipped: usize,
+    pub total_matched_rows: u64,
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    pub records: Vec<NativeSessionProjectRemapDryRunRecord>,
+    pub status: JournalStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeSessionProjectRemapDryRunRecord {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub portable_path: String,
+    pub db_path: String,
+    pub table: String,
+    pub column: String,
+    pub source_project: String,
+    pub target_project: String,
+    pub matched_rows: u64,
+    pub status: JournalOperationStatus,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NativeSessionProjectRemapApplyOptions {
     pub target_home: PathBuf,
     pub target_project: PathBuf,
@@ -515,6 +553,128 @@ pub fn preview_native_session_project_remap(
         candidates,
         warnings,
     }
+}
+
+pub fn dry_run_native_session_project_remap(
+    snapshot: &DeviceSnapshot,
+    options: &NativeSessionProjectRemapDryRunOptions,
+) -> std::io::Result<NativeSessionProjectRemapDryRunReport> {
+    let running_processes = if options.require_agents_stopped {
+        match detect_running_agent_processes(&selected_agent_ids_from_dry_run(options)) {
+            Ok(processes) => processes,
+            Err(error) => {
+                return Ok(blocked_native_session_project_remap_dry_run_report(
+                    options,
+                    vec![format!(
+                        "could not verify Codex/Claude stopped state: {error}; retry after stopping agents or use the explicit skip option"
+                    )],
+                ));
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    dry_run_native_session_project_remap_with_processes(snapshot, options, &running_processes)
+}
+
+pub fn dry_run_native_session_project_remap_with_processes(
+    snapshot: &DeviceSnapshot,
+    options: &NativeSessionProjectRemapDryRunOptions,
+    running_processes: &[RunningAgentProcess],
+) -> std::io::Result<NativeSessionProjectRemapDryRunReport> {
+    let mut blockers = Vec::new();
+    if options.selections.is_empty() {
+        blockers.push("no native DB/index remap candidates were selected".to_string());
+    }
+    if options.source_project.trim().is_empty() {
+        blockers.push("source project is required for exact DB remap dry-run".to_string());
+    }
+    let target_project = options.target_project.display().to_string();
+    if target_project.trim().is_empty() {
+        blockers.push("target project is required for DB remap replacement".to_string());
+    }
+    if options.source_project == target_project {
+        blockers.push(
+            "source project and target project are identical; remap would be a no-op".to_string(),
+        );
+    }
+    if options.require_agents_stopped {
+        blockers.extend(running_agent_blockers_for_agent_ids(
+            &selected_agent_ids_from_dry_run(options),
+            running_processes,
+        ));
+    }
+    if !blockers.is_empty() {
+        return Ok(blocked_native_session_project_remap_dry_run_report(
+            options, blockers,
+        ));
+    }
+
+    let discovery = discover_native_session_stores(
+        snapshot,
+        &NativeSessionStoreDiscoveryOptions {
+            target_home: options.target_home.clone(),
+            target_project: options.target_project.clone(),
+            max_schema_tables: 10_000,
+        },
+    );
+    let mut records = Vec::new();
+    for selection in &options.selections {
+        let Some(store) = discovery.stores.iter().find(|store| {
+            store.agent_id == selection.agent_id && store.portable_path == selection.portable_path
+        }) else {
+            records.push(failed_native_remap_dry_run_record(
+                selection,
+                "",
+                &options.source_project,
+                &target_project,
+                "selected native store was not found in the current target scan",
+            ));
+            continue;
+        };
+        let record = match dry_run_one_native_project_remap(
+            store,
+            selection,
+            &options.source_project,
+            &target_project,
+            &options.target_home,
+            &options.target_project,
+        ) {
+            Ok(record) => record,
+            Err(message) => failed_native_remap_dry_run_record(
+                selection,
+                "",
+                &options.source_project,
+                &target_project,
+                &message,
+            ),
+        };
+        records.push(record);
+    }
+
+    let ready = records
+        .iter()
+        .filter(|record| record.status == JournalOperationStatus::Verified)
+        .count();
+    let total_matched_rows = records.iter().map(|record| record.matched_rows).sum();
+    let failed = records
+        .iter()
+        .any(|record| record.status == JournalOperationStatus::Failed);
+    Ok(NativeSessionProjectRemapDryRunReport {
+        id: Uuid::new_v4(),
+        created_at: Utc::now(),
+        selected: options.selections.len(),
+        ready,
+        skipped: options.selections.len().saturating_sub(ready),
+        total_matched_rows,
+        blockers: Vec::new(),
+        records,
+        status: if failed {
+            JournalStatus::Failed
+        } else {
+            JournalStatus::Completed
+        },
+    })
 }
 
 pub fn apply_native_session_project_remap(
@@ -1403,16 +1563,22 @@ fn selected_agent_ids_from_remap(options: &NativeSessionProjectRemapApplyOptions
         .collect()
 }
 
-fn apply_one_native_project_remap(
-    store: &NativeSessionStoreRecord,
+fn selected_agent_ids_from_dry_run(
+    options: &NativeSessionProjectRemapDryRunOptions,
+) -> Vec<String> {
+    options
+        .selections
+        .iter()
+        .map(|selection| selection.agent_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn validate_native_project_remap_selection<'a>(
+    store: &'a NativeSessionStoreRecord,
     selection: &NativeSessionProjectRemapSelection,
-    source_project: &str,
-    target_project: &str,
-    target_home: &Path,
-    target_project_path: &Path,
-    backup_dir: &Path,
-    backup_by_db: &mut BTreeMap<PathBuf, (PathBuf, String)>,
-) -> Result<NativeSessionProjectRemapRecord, String> {
+) -> Result<&'a SqliteTableSummary, String> {
     if store.store_kind != NativeSessionStoreKind::Sqlite {
         return Err(
             "selected native store is not SQLite; opaque DB/index remap is not supported"
@@ -1445,6 +1611,68 @@ fn apply_one_native_project_remap(
                 .to_string(),
         );
     }
+    Ok(table)
+}
+
+fn dry_run_one_native_project_remap(
+    store: &NativeSessionStoreRecord,
+    selection: &NativeSessionProjectRemapSelection,
+    source_project: &str,
+    target_project: &str,
+    target_home: &Path,
+    target_project_path: &Path,
+) -> Result<NativeSessionProjectRemapDryRunRecord, String> {
+    validate_native_project_remap_selection(store, selection)?;
+    let db_path = resolve_portable_path(&selection.portable_path, target_home, target_project_path)
+        .ok_or_else(|| {
+            "portable SQLite path could not be resolved against target home/project".to_string()
+        })?;
+    if !db_path.exists() {
+        return Err("resolved SQLite database path does not exist".to_string());
+    }
+    let connection = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| format!("could not open SQLite database read-only: {error}"))?;
+    let quoted_table = quote_sqlite_identifier(&selection.table);
+    let quoted_column = quote_sqlite_identifier(&selection.column);
+    let count_sql = format!("SELECT COUNT(*) FROM {quoted_table} WHERE {quoted_column} = ?1");
+    let matched_rows = connection
+        .query_row(&count_sql, params![source_project], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|error| format!("could not count source-project rows: {error}"))?;
+
+    Ok(NativeSessionProjectRemapDryRunRecord {
+        agent_id: store.agent_id.clone(),
+        agent_name: store.agent_name.clone(),
+        portable_path: selection.portable_path.clone(),
+        db_path: db_path.display().to_string(),
+        table: selection.table.clone(),
+        column: selection.column.clone(),
+        source_project: source_project.to_string(),
+        target_project: target_project.to_string(),
+        matched_rows: matched_rows.max(0) as u64,
+        status: JournalOperationStatus::Verified,
+        message: Some(
+            "read-only exact-match count completed; no row contents were returned and no writes were performed"
+                .to_string(),
+        ),
+    })
+}
+
+fn apply_one_native_project_remap(
+    store: &NativeSessionStoreRecord,
+    selection: &NativeSessionProjectRemapSelection,
+    source_project: &str,
+    target_project: &str,
+    target_home: &Path,
+    target_project_path: &Path,
+    backup_dir: &Path,
+    backup_by_db: &mut BTreeMap<PathBuf, (PathBuf, String)>,
+) -> Result<NativeSessionProjectRemapRecord, String> {
+    validate_native_project_remap_selection(store, selection)?;
     let db_path = resolve_portable_path(&selection.portable_path, target_home, target_project_path)
         .ok_or_else(|| {
             "portable SQLite path could not be resolved against target home/project".to_string()
@@ -1542,6 +1770,63 @@ fn failed_native_remap_record(
         updated_rows: 0,
         status: JournalOperationStatus::Failed,
         message: Some(message.to_string()),
+    }
+}
+
+fn failed_native_remap_dry_run_record(
+    selection: &NativeSessionProjectRemapSelection,
+    db_path: &str,
+    source_project: &str,
+    target_project: &str,
+    message: &str,
+) -> NativeSessionProjectRemapDryRunRecord {
+    NativeSessionProjectRemapDryRunRecord {
+        agent_id: selection.agent_id.clone(),
+        agent_name: selection.agent_id.clone(),
+        portable_path: selection.portable_path.clone(),
+        db_path: db_path.to_string(),
+        table: selection.table.clone(),
+        column: selection.column.clone(),
+        source_project: source_project.to_string(),
+        target_project: target_project.to_string(),
+        matched_rows: 0,
+        status: JournalOperationStatus::Failed,
+        message: Some(message.to_string()),
+    }
+}
+
+fn blocked_native_session_project_remap_dry_run_report(
+    options: &NativeSessionProjectRemapDryRunOptions,
+    blockers: Vec<String>,
+) -> NativeSessionProjectRemapDryRunReport {
+    let target_project = options.target_project.display().to_string();
+    let records = options
+        .selections
+        .iter()
+        .map(|selection| NativeSessionProjectRemapDryRunRecord {
+            agent_id: selection.agent_id.clone(),
+            agent_name: selection.agent_id.clone(),
+            portable_path: selection.portable_path.clone(),
+            db_path: String::new(),
+            table: selection.table.clone(),
+            column: selection.column.clone(),
+            source_project: options.source_project.clone(),
+            target_project: target_project.clone(),
+            matched_rows: 0,
+            status: JournalOperationStatus::Blocked,
+            message: Some(blockers.join(" / ")),
+        })
+        .collect();
+    NativeSessionProjectRemapDryRunReport {
+        id: Uuid::new_v4(),
+        created_at: Utc::now(),
+        selected: options.selections.len(),
+        ready: 0,
+        skipped: options.selections.len(),
+        total_matched_rows: 0,
+        blockers,
+        records,
+        status: JournalStatus::Failed,
     }
 }
 
@@ -3385,6 +3670,86 @@ mod tests {
                 .any(|warning| warning.contains("schema-only"))
         );
         assert!(!format!("{report:?}").contains("do not read row"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dry_runs_sqlite_project_remap_counts_without_writing() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-sync-native-remap-dry-run-{}",
+            Uuid::new_v4()
+        ));
+        let home = root.join("home");
+        let project = root.join("target-project");
+        let db_path = home.join(".codex").join("state").join("sessions.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection
+            .execute(
+                "CREATE TABLE conversations (id TEXT PRIMARY KEY, project_path TEXT, cwd TEXT, title TEXT)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversations (id, project_path, cwd, title) VALUES ('one', '/source/project', '/source/project', 'do not read row')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversations (id, project_path, cwd, title) VALUES ('two', '/other/project', '/other/project', 'session two')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let snapshot = sqlite_store_snapshot(&project, &db_path);
+        let report = dry_run_native_session_project_remap_with_processes(
+            &snapshot,
+            &NativeSessionProjectRemapDryRunOptions {
+                target_home: home.clone(),
+                target_project: project.clone(),
+                source_project: "/source/project".into(),
+                selections: vec![NativeSessionProjectRemapSelection {
+                    agent_id: "codex".into(),
+                    portable_path: "~/.codex/state/sessions.db".into(),
+                    table: "conversations".into(),
+                    column: "project_path".into(),
+                }],
+                require_agents_stopped: true,
+            },
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(report.status, JournalStatus::Completed);
+        assert_eq!(report.selected, 1);
+        assert_eq!(report.ready, 1);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(report.total_matched_rows, 1);
+        assert_eq!(report.records[0].matched_rows, 1);
+        assert_eq!(report.records[0].status, JournalOperationStatus::Verified);
+        assert!(!format!("{report:?}").contains("do not read row"));
+
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        let source_project: String = connection
+            .query_row(
+                "SELECT project_path FROM conversations WHERE id = 'one'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let other_project: String = connection
+            .query_row(
+                "SELECT project_path FROM conversations WHERE id = 'two'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(source_project, "/source/project");
+        assert_eq!(other_project, "/other/project");
         let _ = fs::remove_dir_all(root);
     }
 

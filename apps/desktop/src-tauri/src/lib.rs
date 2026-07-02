@@ -1,5 +1,6 @@
 use agent_sync_apply::{
     ApplyContext, ApplyPayloadOptions, NativeSessionProjectRemapApplyOptions,
+    NativeSessionProjectRemapDryRunOptions, NativeSessionProjectRemapDryRunReport,
     NativeSessionProjectRemapJournal, NativeSessionProjectRemapPreviewOptions,
     NativeSessionProjectRemapPreviewReport, NativeSessionProjectRemapSelection,
     NativeSessionStoreDiscoveryOptions, NativeSessionStoreDiscoveryReport, OperationJournal,
@@ -8,7 +9,7 @@ use agent_sync_apply::{
     SessionNativeImportReadinessOptions, SessionNativeImportReadinessReport,
     SessionNativeImportStageJournal, SessionNativeImportStageOptions,
     apply_native_session_project_remap, apply_payloads, create_journal,
-    discover_native_session_stores, import_session_archives,
+    discover_native_session_stores, dry_run_native_session_project_remap, import_session_archives,
     import_session_payloads_to_native_files, preflight, preview_native_session_project_remap,
     rollback_journal, rollback_native_session_project_remap_journal,
     rollback_session_native_file_import_journal, session_native_import_readiness,
@@ -387,6 +388,36 @@ fn preview_native_session_project_remap_command(
 }
 
 #[tauri::command]
+fn dry_run_native_session_project_remap_command(
+    snapshot: DeviceSnapshot,
+    target_home: Option<String>,
+    target_project: Option<String>,
+    source_project: String,
+    selections: Vec<NativeSessionProjectRemapSelection>,
+    require_agents_stopped: Option<bool>,
+) -> Result<NativeSessionProjectRemapDryRunReport, String> {
+    let target_home = target_home
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let target_project = match target_project {
+        Some(project) => PathBuf::from(project),
+        None => std::env::current_dir().map_err(|error| error.to_string())?,
+    };
+    dry_run_native_session_project_remap(
+        &snapshot,
+        &NativeSessionProjectRemapDryRunOptions {
+            target_home,
+            target_project,
+            source_project,
+            selections,
+            require_agents_stopped: require_agents_stopped.unwrap_or(true),
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn apply_native_session_project_remap_command(
     snapshot: DeviceSnapshot,
     target_home: Option<String>,
@@ -580,6 +611,7 @@ pub fn run() {
             session_native_import_readiness_command,
             discover_native_session_stores_command,
             preview_native_session_project_remap_command,
+            dry_run_native_session_project_remap_command,
             apply_native_session_project_remap_command,
             rollback_native_session_project_remap_journal_command,
             import_session_payloads_to_native_files_command,
