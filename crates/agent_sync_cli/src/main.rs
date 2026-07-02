@@ -1,6 +1,6 @@
 use agent_sync_apply::{
-    SessionNativeFileImportOptions, create_journal, import_session_payloads_to_native_files,
-    preflight,
+    OperationJournal, SessionNativeFileImportOptions, create_journal,
+    import_session_payloads_to_native_files, preflight, rollback_journal,
 };
 use agent_sync_bundle::{
     BundleExportOptions, PayloadSelectionRef, export_bundle, manifest_from_snapshot,
@@ -92,6 +92,14 @@ fn main() -> anyhow::Result<()> {
             )?;
             println!("{}", serde_json::to_string_pretty(&journal)?);
         }
+        "rollback-journal" => {
+            let input = value_after(&args, "--input")
+                .unwrap_or_else(|| "agent-sync-journal.json".to_string());
+            let bytes = std::fs::read(input)?;
+            let journal: OperationJournal = serde_json::from_slice(&bytes)?;
+            let rolled_back = rollback_journal(&journal)?;
+            println!("{}", serde_json::to_string_pretty(&rolled_back)?);
+        }
         "self-plan" => {
             let snapshot = scan_device(default_scan_options(&args))?;
             let plan = create_transform_plan(&snapshot, &snapshot, None);
@@ -104,7 +112,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|import-native-sessions|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity]"
+                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|import-native-sessions|rollback-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity]"
             );
             std::process::exit(2);
         }

@@ -34,6 +34,7 @@ The older Node CLI remains available as a legacy reference while the Rust/Tauri 
 - Stage selected raw session payloads into an isolated native-import directory with optional source-project to target-project path rewriting.
 - Import selected raw session payloads into the target home as native Codex/Claude session files, limited to `~/.codex/**` and `~/.claude/**`, with backup, path rewriting, and checksum journal.
 - Apply selected safe payloads with backups and checksum verification.
+- Roll back apply journals by restoring backed-up files or removing files that did not exist before the apply.
 - Persist snapshots in a local SQLite record store.
 
 ## Commands
@@ -48,6 +49,7 @@ cargo run -p agent_sync_cli -- export-bundle --output agent-sync-review.asbundle
 cargo run -p agent_sync_cli -- export-bundle --output agent-sync-sessions.asbundle --max-depth 8 --max-entries 5000 --include-session-payloads --session "codex:~/.codex/sessions/YYYY/MM/DD/session.jsonl"
 cargo run -p agent_sync_cli -- verify-bundle --input agent-sync-local.asbundle
 cargo run -p agent_sync_cli -- import-native-sessions --input agent-sync-sessions.asbundle --target-home "$HOME" --target-project "$PWD" --backup-dir agent-sync-backups --session "codex:~/.codex/sessions/YYYY/MM/DD/session.jsonl"
+cargo run -p agent_sync_cli -- rollback-journal --input agent-sync-journal.json
 cargo run -p agent_sync_cli -- self-plan
 
 # Desktop frontend and app
@@ -80,6 +82,7 @@ Automatically applicable today:
 
 - safe text config payloads from a verified bundle, only through selected operations, with backup and checksum verification.
 - explicitly selected `memory_knowledge` and `mcp_config` text payloads from a verified bundle, only after the review-acknowledgement gate, with backup and checksum verification.
+- apply journal rollback for backup-backed changes and files created by the apply.
 - metadata-only session archive records into Agent Sync Studio SQLite storage.
 - selected raw session payloads into an isolated staging directory with project-path rewrite journal.
 - selected raw session payloads into native Codex/Claude file locations under a chosen target home, with strict `~/.codex/**` / `~/.claude/**` allowlisting, backup, optional project-path rewrite, and checksum verification. This does not rewrite native Codex/Claude databases or secondary indexes.

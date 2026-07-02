@@ -734,6 +734,19 @@ pub fn apply_payloads(
                 backup_path: backup.display().to_string(),
                 checksum: Some(format!("{:x}", Sha256::digest(fs::read(&target)?))),
             });
+        } else {
+            let backup = context.backup_dir.join(format!(
+                "{}-{}-absent",
+                Uuid::new_v4(),
+                sanitize_path(&entry.operation.path)
+            ));
+            fs::write(&backup, b"target did not exist before apply")?;
+            entry.backup = Some(BackupRef {
+                id: Uuid::new_v4(),
+                original_path: target.display().to_string(),
+                backup_path: backup.display().to_string(),
+                checksum: None,
+            });
         }
         fs::write(&target, &bytes)?;
         let written = fs::read(&target)?;
@@ -757,6 +770,62 @@ pub fn apply_payloads(
         JournalStatus::Completed
     };
     Ok(journal)
+}
+
+pub fn rollback_journal(journal: &OperationJournal) -> std::io::Result<OperationJournal> {
+    let mut rolled_back = journal.clone();
+    rolled_back.status = JournalStatus::RolledBack;
+
+    for entry in &mut rolled_back.operations {
+        let Some(backup) = &entry.backup else {
+            entry.status = JournalOperationStatus::Blocked;
+            entry.message = Some("no backup reference available for rollback".to_string());
+            continue;
+        };
+
+        let original_path = PathBuf::from(&backup.original_path);
+        match backup.checksum.as_deref() {
+            Some(expected_sha) => {
+                if let Some(parent) = original_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(&backup.backup_path, &original_path)?;
+                let restored = fs::read(&original_path)?;
+                let restored_sha = format!("{:x}", Sha256::digest(&restored));
+                if restored_sha == expected_sha {
+                    entry.status = JournalOperationStatus::RolledBack;
+                    entry.message = Some("restored from backup and checksum verified".to_string());
+                } else {
+                    entry.status = JournalOperationStatus::Failed;
+                    entry.message = Some("restored checksum mismatch".to_string());
+                    rolled_back.status = JournalStatus::Failed;
+                }
+            }
+            None => {
+                if original_path.exists() {
+                    fs::remove_file(&original_path)?;
+                }
+                entry.status = JournalOperationStatus::RolledBack;
+                entry.message = Some("removed file that did not exist before apply".to_string());
+            }
+        }
+    }
+
+    if rolled_back
+        .operations
+        .iter()
+        .any(|entry| matches!(entry.status, JournalOperationStatus::Failed))
+    {
+        rolled_back.status = JournalStatus::Failed;
+    } else if rolled_back
+        .operations
+        .iter()
+        .any(|entry| matches!(entry.status, JournalOperationStatus::Blocked))
+    {
+        rolled_back.status = JournalStatus::Failed;
+    }
+
+    Ok(rolled_back)
 }
 
 fn can_apply_payload_operation(
@@ -926,6 +995,203 @@ mod tests {
             "new"
         );
         assert!(backup.read_dir().unwrap().next().is_some());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rollback_restores_backed_up_file() {
+        let root = std::env::temp_dir().join(format!("agent-sync-rollback-{}", Uuid::new_v4()));
+        let project = root.join("project");
+        let backup = root.join("backup");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("AGENTS.md"), "old").unwrap();
+        let bytes = b"new".to_vec();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let bundle = SyncBundle {
+            manifest: agent_sync_bundle::SyncBundleManifest {
+                schema_version: "0.2".into(),
+                id: Uuid::new_v4(),
+                created_at: Utc::now(),
+                source_snapshot: Uuid::new_v4(),
+                selections: vec![],
+                redactions: vec![],
+                encryption: agent_sync_bundle::BundleEncryptionInfo {
+                    required_for_sensitive_payloads: true,
+                    method: "none".into(),
+                },
+            },
+            source_snapshot: agent_sync_core::DeviceSnapshot {
+                schema_version: "0.2".into(),
+                id: Uuid::new_v4(),
+                generated_at: Utc::now(),
+                platform: agent_sync_core::PlatformInfo {
+                    os: "test".into(),
+                    arch: "test".into(),
+                },
+                inputs: agent_sync_core::SnapshotInputs {
+                    home: "~".into(),
+                    project: project.display().to_string(),
+                    max_depth: 1,
+                    max_entries: 10,
+                },
+                summary: agent_sync_core::SnapshotSummary::default(),
+                projects: vec![],
+                agents: vec![],
+            },
+            payloads: vec![PayloadEntry {
+                agent_id: "codex".into(),
+                portable_path: "<project>/AGENTS.md".into(),
+                sha256: sha,
+                base64_content: base64::engine::general_purpose::STANDARD.encode(bytes),
+            }],
+            session_archives: vec![],
+        };
+        let plan = TransformPlan {
+            id: Uuid::new_v4(),
+            generated_at: Utc::now(),
+            source_snapshot: Uuid::new_v4(),
+            target_snapshot: Uuid::new_v4(),
+            target_platform: "darwin".into(),
+            operations: vec![ApplyOperation {
+                id: Uuid::new_v4(),
+                agent_id: "codex".into(),
+                agent_name: "Codex".into(),
+                path: "<project>/AGENTS.md".into(),
+                kind: ApplyOperationKind::MergeText,
+                safety_class: SafetyClass::SafeConfig,
+                risk: "low-medium".into(),
+                rationale: "test".into(),
+                change_type: ChangeType::ChangedBetweenSnapshots,
+                path_warnings: vec![],
+                requires_review: false,
+                requires_backup: true,
+            }],
+            project_mappings: vec![],
+            blocked: vec![],
+            warnings: vec![],
+            summary: TransformSummary::default(),
+        };
+        let journal = apply_safe_payloads(
+            &bundle,
+            &plan,
+            &ApplyContext {
+                target_home: root.join("home"),
+                target_project: project.clone(),
+                backup_dir: backup,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(project.join("AGENTS.md")).unwrap(),
+            "new"
+        );
+
+        let rollback = rollback_journal(&journal).unwrap();
+        assert_eq!(rollback.status, JournalStatus::RolledBack);
+        assert_eq!(
+            rollback.operations[0].status,
+            JournalOperationStatus::RolledBack
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("AGENTS.md")).unwrap(),
+            "old"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rollback_removes_file_created_by_apply() {
+        let root = std::env::temp_dir().join(format!("agent-sync-rollback-new-{}", Uuid::new_v4()));
+        let project = root.join("project");
+        let backup = root.join("backup");
+        fs::create_dir_all(&project).unwrap();
+        let bytes = b"new".to_vec();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let bundle = SyncBundle {
+            manifest: agent_sync_bundle::SyncBundleManifest {
+                schema_version: "0.2".into(),
+                id: Uuid::new_v4(),
+                created_at: Utc::now(),
+                source_snapshot: Uuid::new_v4(),
+                selections: vec![],
+                redactions: vec![],
+                encryption: agent_sync_bundle::BundleEncryptionInfo {
+                    required_for_sensitive_payloads: true,
+                    method: "none".into(),
+                },
+            },
+            source_snapshot: agent_sync_core::DeviceSnapshot {
+                schema_version: "0.2".into(),
+                id: Uuid::new_v4(),
+                generated_at: Utc::now(),
+                platform: agent_sync_core::PlatformInfo {
+                    os: "test".into(),
+                    arch: "test".into(),
+                },
+                inputs: agent_sync_core::SnapshotInputs {
+                    home: "~".into(),
+                    project: project.display().to_string(),
+                    max_depth: 1,
+                    max_entries: 10,
+                },
+                summary: agent_sync_core::SnapshotSummary::default(),
+                projects: vec![],
+                agents: vec![],
+            },
+            payloads: vec![PayloadEntry {
+                agent_id: "codex".into(),
+                portable_path: "<project>/NEW.md".into(),
+                sha256: sha,
+                base64_content: base64::engine::general_purpose::STANDARD.encode(bytes),
+            }],
+            session_archives: vec![],
+        };
+        let plan = TransformPlan {
+            id: Uuid::new_v4(),
+            generated_at: Utc::now(),
+            source_snapshot: Uuid::new_v4(),
+            target_snapshot: Uuid::new_v4(),
+            target_platform: "darwin".into(),
+            operations: vec![ApplyOperation {
+                id: Uuid::new_v4(),
+                agent_id: "codex".into(),
+                agent_name: "Codex".into(),
+                path: "<project>/NEW.md".into(),
+                kind: ApplyOperationKind::CopyFile,
+                safety_class: SafetyClass::SafeConfig,
+                risk: "low-medium".into(),
+                rationale: "test".into(),
+                change_type: ChangeType::MissingOnTarget,
+                path_warnings: vec![],
+                requires_review: false,
+                requires_backup: true,
+            }],
+            project_mappings: vec![],
+            blocked: vec![],
+            warnings: vec![],
+            summary: TransformSummary::default(),
+        };
+        let journal = apply_safe_payloads(
+            &bundle,
+            &plan,
+            &ApplyContext {
+                target_home: root.join("home"),
+                target_project: project.clone(),
+                backup_dir: backup,
+            },
+        )
+        .unwrap();
+        assert!(project.join("NEW.md").exists());
+        assert!(
+            journal.operations[0]
+                .backup
+                .as_ref()
+                .is_some_and(|backup| backup.checksum.is_none())
+        );
+
+        let rollback = rollback_journal(&journal).unwrap();
+        assert_eq!(rollback.status, JournalStatus::RolledBack);
+        assert!(!project.join("NEW.md").exists());
         let _ = fs::remove_dir_all(root);
     }
 

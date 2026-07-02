@@ -3,7 +3,8 @@ use agent_sync_apply::{
     SessionArchiveImportJournal, SessionArchiveImportOptions, SessionNativeFileImportJournal,
     SessionNativeFileImportOptions, SessionNativeImportStageJournal,
     SessionNativeImportStageOptions, apply_payloads, create_journal, import_session_archives,
-    import_session_payloads_to_native_files, preflight, stage_session_native_import,
+    import_session_payloads_to_native_files, preflight, rollback_journal,
+    stage_session_native_import,
 };
 use agent_sync_bundle::{
     BundleExportOptions, PayloadSelectionRef, SyncBundle, SyncBundleManifest, export_bundle,
@@ -152,6 +153,11 @@ fn apply_safe_payloads_command(
 }
 
 #[tauri::command]
+fn rollback_journal_command(journal: OperationJournal) -> Result<OperationJournal, String> {
+    rollback_journal(&journal).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn import_session_archives_command(
     bundle: SyncBundle,
     db_path: String,
@@ -245,6 +251,7 @@ pub fn run() {
             preflight_plan,
             create_operation_journal,
             apply_safe_payloads_command,
+            rollback_journal_command,
             import_session_archives_command,
             stage_session_native_import_command,
             import_session_payloads_to_native_files_command,

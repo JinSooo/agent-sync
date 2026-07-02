@@ -377,6 +377,20 @@ export function App() {
     }
   }
 
+  async function rollbackLastJournal() {
+    if (!journal) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const nextJournal = await invoke<OperationJournal>('rollback_journal_command', { journal });
+      setJournal(nextJournal);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function importSelectedSessionArchives() {
     if (!importedBundle) return;
     setBusy(true);
@@ -847,6 +861,9 @@ export function App() {
               <h2>Apply journal</h2>
               <span>{journal.id} · {journal.status}</span>
             </div>
+            <button className="secondary" onClick={rollbackLastJournal} disabled={busy || journal.status === 'rolled_back'}>
+              Rollback this journal
+            </button>
             <ul className="operationList">
               {journal.operations.map((entry) => (
                 <li key={entry.operation.id}>{entry.status} · {entry.operation.path} · {entry.message ?? 'no message'}</li>
