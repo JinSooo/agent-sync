@@ -261,6 +261,36 @@ pub struct NativeSessionStoreDiscoveryReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeSessionCompatibilityOptions {
+    pub target_home: PathBuf,
+    pub target_project: PathBuf,
+    pub max_schema_tables: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeSessionCompatibilityReport {
+    pub warnings: Vec<String>,
+    pub agents: Vec<NativeSessionCompatibilityAgent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeSessionCompatibilityAgent {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub detected: bool,
+    pub can_export_sessions: bool,
+    pub can_import_native_files: bool,
+    pub claims_db_index_remap: bool,
+    pub supports_transactional_apply: bool,
+    pub sqlite_store_candidates: usize,
+    pub sqlite_project_remap_candidates: usize,
+    pub opaque_store_candidates: usize,
+    pub support_level: String,
+    pub evidence: Vec<String>,
+    pub next_steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NativeSessionStoreRecord {
     pub agent_id: String,
     pub agent_name: String,
@@ -484,6 +514,122 @@ pub fn discover_native_session_stores(
         );
     }
     NativeSessionStoreDiscoveryReport { stores, warnings }
+}
+
+pub fn native_session_compatibility_report(
+    snapshot: &DeviceSnapshot,
+    options: &NativeSessionCompatibilityOptions,
+) -> NativeSessionCompatibilityReport {
+    let discovery = discover_native_session_stores(
+        snapshot,
+        &NativeSessionStoreDiscoveryOptions {
+            target_home: options.target_home.clone(),
+            target_project: options.target_project.clone(),
+            max_schema_tables: options.max_schema_tables,
+        },
+    );
+    let preview = preview_native_session_project_remap(
+        snapshot,
+        &NativeSessionProjectRemapPreviewOptions {
+            target_home: options.target_home.clone(),
+            target_project: options.target_project.clone(),
+            source_project: None,
+            max_schema_tables: options.max_schema_tables,
+        },
+    );
+    let mut warnings = discovery.warnings.clone();
+    for warning in &preview.warnings {
+        if !warnings.contains(warning) {
+            warnings.push(warning.clone());
+        }
+    }
+    let agents = snapshot
+        .agents
+        .iter()
+        .map(|agent| {
+            let stores = discovery
+                .stores
+                .iter()
+                .filter(|store| store.agent_id == agent.id)
+                .collect::<Vec<_>>();
+            let sqlite_store_candidates = stores
+                .iter()
+                .filter(|store| store.store_kind == NativeSessionStoreKind::Sqlite)
+                .count();
+            let opaque_store_candidates = stores
+                .iter()
+                .filter(|store| {
+                    matches!(
+                        store.store_kind,
+                        NativeSessionStoreKind::LevelDb
+                            | NativeSessionStoreKind::IndexedDb
+                            | NativeSessionStoreKind::Unknown
+                    )
+                })
+                .count();
+            let sqlite_project_remap_candidates = preview
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.agent_id == agent.id && candidate.write_supported)
+                .count();
+            let mut evidence = Vec::new();
+            let mut next_steps = Vec::new();
+            if agent.capabilities.can_import_sessions {
+                evidence.push("adapter declares native session-file import support".to_string());
+            } else {
+                next_steps.push("adapter does not declare native session-file import support".to_string());
+            }
+            if sqlite_project_remap_candidates > 0 {
+                evidence.push(format!(
+                    "{sqlite_project_remap_candidates} SQLite exact-match project remap candidate(s) found"
+                ));
+            }
+            if opaque_store_candidates > 0 {
+                evidence.push(format!(
+                    "{opaque_store_candidates} opaque DB/index candidate(s) inventoried without row reads"
+                ));
+                next_steps.push(
+                    "collect adapter-specific fixtures before enabling opaque DB/index writes"
+                        .to_string(),
+                );
+            }
+            if !agent.capabilities.can_remap_session_project {
+                next_steps.push(
+                    "adapter capability intentionally does not claim broad DB/index remap"
+                        .to_string(),
+                );
+            }
+            let support_level = if agent.capabilities.can_import_sessions
+                && sqlite_project_remap_candidates > 0
+            {
+                "native_files_plus_sqlite_exact_match".to_string()
+            } else if agent.capabilities.can_import_sessions {
+                "native_file_import".to_string()
+            } else if sqlite_project_remap_candidates > 0 {
+                "sqlite_exact_match_remap_only".to_string()
+            } else if opaque_store_candidates > 0 {
+                "fixture_required_for_opaque_indexes".to_string()
+            } else {
+                "metadata_only_or_not_detected".to_string()
+            };
+            NativeSessionCompatibilityAgent {
+                agent_id: agent.id.clone(),
+                agent_name: agent.name.clone(),
+                detected: agent.detected,
+                can_export_sessions: agent.capabilities.can_export_sessions,
+                can_import_native_files: agent.capabilities.can_import_sessions,
+                claims_db_index_remap: agent.capabilities.can_remap_session_project,
+                supports_transactional_apply: agent.capabilities.supports_transactional_apply,
+                sqlite_store_candidates,
+                sqlite_project_remap_candidates,
+                opaque_store_candidates,
+                support_level,
+                evidence,
+                next_steps,
+            }
+        })
+        .collect();
+    NativeSessionCompatibilityReport { warnings, agents }
 }
 
 pub fn preview_native_session_project_remap(
@@ -958,7 +1104,12 @@ fn native_session_store_kind(portable_path: &str) -> Option<NativeSessionStoreKi
     }
     if lower.ends_with(".sqlite") || lower.ends_with(".sqlite3") || lower.ends_with(".db") {
         Some(NativeSessionStoreKind::Sqlite)
-    } else if lower.contains("/leveldb/") || lower.ends_with(".ldb") {
+    } else if lower.contains("/leveldb/")
+        || lower.ends_with("/leveldb")
+        || lower.contains(".leveldb/")
+        || lower.ends_with(".leveldb")
+        || lower.ends_with(".ldb")
+    {
         Some(NativeSessionStoreKind::LevelDb)
     } else if lower.contains("/indexeddb/") {
         Some(NativeSessionStoreKind::IndexedDb)
@@ -3576,6 +3727,64 @@ mod tests {
             vec!["id", "project_path", "title"]
         );
         assert!(!format!("{report:?}").contains("do not read row"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compatibility_report_keeps_opaque_db_remap_fixture_gated() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-sync-native-compatibility-{}",
+            Uuid::new_v4()
+        ));
+        let home = root.join("home");
+        let project = root.join("project");
+        let db_path = home.join(".codex").join("state").join("sessions.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection
+            .execute("CREATE TABLE conversations (project_path TEXT)", [])
+            .unwrap();
+        drop(connection);
+
+        let mut snapshot = sqlite_store_snapshot(&project, &db_path);
+        snapshot.agents[0].capabilities = agent_sync_core::AdapterCapabilities {
+            can_import_sessions: true,
+            can_export_sessions: true,
+            can_list_sessions: true,
+            supports_transactional_apply: true,
+            ..Default::default()
+        };
+        snapshot.agents[0].findings[0].path = "~/.codex/state/sessions.db".into();
+        snapshot.agents[0].findings[0].portable_path = "~/.codex/state/sessions.db".into();
+        snapshot.agents[0].findings.push(agent_sync_core::Finding {
+            path: "~/.codex/state/index.leveldb".into(),
+            portable_path: "~/.codex/state/index.leveldb".into(),
+            kind: agent_sync_core::FileKind::Directory,
+            depth: 3,
+            size: None,
+            mtime: None,
+            safety_class: agent_sync_core::SafetyClass::Database,
+            risk: agent_sync_core::RiskLevel::High,
+            reason: "opaque fixture".into(),
+            recommendation: "inventory only".into(),
+            truncated: false,
+        });
+
+        let report = native_session_compatibility_report(
+            &snapshot,
+            &NativeSessionCompatibilityOptions {
+                target_home: home,
+                target_project: project,
+                max_schema_tables: 20,
+            },
+        );
+        let agent = &report.agents[0];
+        assert!(agent.can_import_native_files);
+        assert!(!agent.claims_db_index_remap);
+        assert_eq!(agent.sqlite_project_remap_candidates, 1);
+        assert_eq!(agent.opaque_store_candidates, 1);
+        assert!(agent.next_steps.iter().any(|step| step.contains("fixture")));
         let _ = fs::remove_dir_all(root);
     }
 

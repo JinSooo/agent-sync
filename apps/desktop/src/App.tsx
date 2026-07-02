@@ -342,6 +342,25 @@ type NativeSessionStoreDiscoveryReport = {
   }>;
 };
 
+type NativeSessionCompatibilityReport = {
+  warnings: string[];
+  agents: Array<{
+    agent_id: string;
+    agent_name: string;
+    detected: boolean;
+    can_export_sessions: boolean;
+    can_import_native_files: boolean;
+    claims_db_index_remap: boolean;
+    supports_transactional_apply: boolean;
+    sqlite_store_candidates: number;
+    sqlite_project_remap_candidates: number;
+    opaque_store_candidates: number;
+    support_level: string;
+    evidence: string[];
+    next_steps: string[];
+  }>;
+};
+
 type NativeSessionProjectRemapPreviewReport = {
   warnings: string[];
   candidates: NativeSessionProjectRemapCandidate[];
@@ -456,6 +475,7 @@ export function App() {
   const [sessionNativeFileJournal, setSessionNativeFileJournal] = useState<SessionNativeFileImportJournal | null>(null);
   const [sessionReadinessReport, setSessionReadinessReport] = useState<SessionNativeImportReadinessReport | null>(null);
   const [nativeStoreReport, setNativeStoreReport] = useState<NativeSessionStoreDiscoveryReport | null>(null);
+  const [nativeCompatibilityReport, setNativeCompatibilityReport] = useState<NativeSessionCompatibilityReport | null>(null);
   const [nativeRemapPreview, setNativeRemapPreview] = useState<NativeSessionProjectRemapPreviewReport | null>(null);
   const [nativeRemapDryRun, setNativeRemapDryRun] = useState<NativeSessionProjectRemapDryRunReport | null>(null);
   const [nativeRemapDryRunSelectionKey, setNativeRemapDryRunSelectionKey] = useState('');
@@ -524,6 +544,7 @@ export function App() {
       setSessionNativeFileJournal(null);
       setSessionReadinessReport(null);
       setNativeStoreReport(null);
+      setNativeCompatibilityReport(null);
       setNativeRemapPreview(null);
       setNativeRemapDryRun(null);
       setNativeRemapDryRunSelectionKey('');
@@ -835,6 +856,25 @@ export function App() {
         maxSchemaTables: 20
       });
       setNativeStoreReport(report);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createNativeCompatibilityReport() {
+    if (!snapshot) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const report = await invoke<NativeSessionCompatibilityReport>('native_session_compatibility_report_command', {
+        snapshot,
+        targetHome: targetHomePath || undefined,
+        targetProject: targetProjectPath || undefined,
+        maxSchemaTables: 20
+      });
+      setNativeCompatibilityReport(report);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1588,6 +1628,7 @@ export function App() {
               <button className="secondary" onClick={refreshSessionNativeFileJournalHistory} disabled={busy}>Refresh native import journals</button>
               <button className="secondary" onClick={refreshNativeRemapJournalHistory} disabled={busy}>Refresh DB remap journals</button>
               <button className="secondary" onClick={discoverNativeSessionStores} disabled={!snapshot || busy}>Discover native stores</button>
+              <button className="secondary" onClick={createNativeCompatibilityReport} disabled={!snapshot || busy}>Compatibility report</button>
               <button className="secondary" onClick={previewNativeSessionProjectRemap} disabled={!snapshot || busy}>Preview DB remap columns</button>
               <label>
                 Session staging directory
@@ -2024,6 +2065,36 @@ export function App() {
             ) : (
               <p className="empty">No Codex/Claude DB/index candidates were found in the current scan. Increase scan depth/entries if expected stores are missing.</p>
             )}
+          </section>
+        )}
+
+        {nativeCompatibilityReport && (
+          <section className="panel">
+            <div className="panelTitle">
+              <h2>Native compatibility evidence</h2>
+              <span>{nativeCompatibilityReport.agents.length} agent(s) · read-only matrix</span>
+            </div>
+            {nativeCompatibilityReport.warnings.length > 0 && (
+              <div className="notice">{nativeCompatibilityReport.warnings.join(' / ')}</div>
+            )}
+            <ul className="operationList">
+              {nativeCompatibilityReport.agents.map((agent) => (
+                <li key={agent.agent_id}>
+                  {agent.agent_name} · {agent.detected ? 'detected' : 'absent'} · {agent.support_level}
+                  <small>
+                    native files: {agent.can_import_native_files ? 'yes' : 'no'} ·
+                    export: {agent.can_export_sessions ? 'yes' : 'no'} ·
+                    transactional: {agent.supports_transactional_apply ? 'yes' : 'no'} ·
+                    SQLite stores: {agent.sqlite_store_candidates} ·
+                    SQLite remap candidates: {agent.sqlite_project_remap_candidates} ·
+                    opaque DB/index candidates: {agent.opaque_store_candidates} ·
+                    broad DB/index claim: {agent.claims_db_index_remap ? 'yes' : 'no'}
+                  </small>
+                  {agent.evidence.length > 0 && <small>Evidence: {agent.evidence.join(' / ')}</small>}
+                  {agent.next_steps.length > 0 && <small>Next: {agent.next_steps.join(' / ')}</small>}
+                </li>
+              ))}
+            </ul>
           </section>
         )}
 

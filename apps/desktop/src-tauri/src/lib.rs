@@ -1,5 +1,6 @@
 use agent_sync_apply::{
-    ApplyContext, ApplyPayloadOptions, NativeSessionProjectRemapApplyOptions,
+    ApplyContext, ApplyPayloadOptions, NativeSessionCompatibilityOptions,
+    NativeSessionCompatibilityReport, NativeSessionProjectRemapApplyOptions,
     NativeSessionProjectRemapDryRunOptions, NativeSessionProjectRemapDryRunReport,
     NativeSessionProjectRemapJournal, NativeSessionProjectRemapPreviewOptions,
     NativeSessionProjectRemapPreviewReport, NativeSessionProjectRemapSelection,
@@ -10,10 +11,10 @@ use agent_sync_apply::{
     SessionNativeImportStageJournal, SessionNativeImportStageOptions,
     apply_native_session_project_remap, apply_payloads, create_journal,
     discover_native_session_stores, dry_run_native_session_project_remap, import_session_archives,
-    import_session_payloads_to_native_files, preflight, preview_native_session_project_remap,
-    rollback_journal, rollback_native_session_project_remap_journal,
-    rollback_session_native_file_import_journal, session_native_import_readiness,
-    stage_session_native_import,
+    import_session_payloads_to_native_files, native_session_compatibility_report, preflight,
+    preview_native_session_project_remap, rollback_journal,
+    rollback_native_session_project_remap_journal, rollback_session_native_file_import_journal,
+    session_native_import_readiness, stage_session_native_import,
 };
 use agent_sync_bundle::{
     BUNDLE_RECIPIENT_PROFILE_KIND, BundleDeviceKeySummary, BundleExportOptions,
@@ -380,6 +381,31 @@ fn discover_native_session_stores_command(
     Ok(discover_native_session_stores(
         &snapshot,
         &NativeSessionStoreDiscoveryOptions {
+            target_home,
+            target_project,
+            max_schema_tables: max_schema_tables.unwrap_or(20),
+        },
+    ))
+}
+
+#[tauri::command]
+fn native_session_compatibility_report_command(
+    snapshot: DeviceSnapshot,
+    target_home: Option<String>,
+    target_project: Option<String>,
+    max_schema_tables: Option<usize>,
+) -> Result<NativeSessionCompatibilityReport, String> {
+    let target_home = target_home
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let target_project = match target_project {
+        Some(project) => PathBuf::from(project),
+        None => std::env::current_dir().map_err(|error| error.to_string())?,
+    };
+    Ok(native_session_compatibility_report(
+        &snapshot,
+        &NativeSessionCompatibilityOptions {
             target_home,
             target_project,
             max_schema_tables: max_schema_tables.unwrap_or(20),
@@ -794,6 +820,7 @@ pub fn run() {
             stage_session_native_import_command,
             session_native_import_readiness_command,
             discover_native_session_stores_command,
+            native_session_compatibility_report_command,
             preview_native_session_project_remap_command,
             dry_run_native_session_project_remap_command,
             apply_native_session_project_remap_command,
