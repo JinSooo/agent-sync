@@ -978,6 +978,92 @@ pub fn rollback_journal(journal: &OperationJournal) -> std::io::Result<Operation
     Ok(rolled_back)
 }
 
+pub fn rollback_session_native_file_import_journal(
+    journal: &SessionNativeFileImportJournal,
+) -> std::io::Result<SessionNativeFileImportJournal> {
+    let mut rolled_back = journal.clone();
+    rolled_back.status = JournalStatus::RolledBack;
+
+    for record in &mut rolled_back.records {
+        record.note = "native file import rollback attempted".to_string();
+        for payload in &mut record.written_payloads {
+            if payload.status != JournalOperationStatus::Verified {
+                continue;
+            }
+            if payload.target_path.is_empty() {
+                payload.status = JournalOperationStatus::Failed;
+                payload.message = Some("no target path available for rollback".to_string());
+                rolled_back.status = JournalStatus::Failed;
+                continue;
+            }
+
+            let target_path = PathBuf::from(&payload.target_path);
+            match payload.backup_path.as_deref() {
+                Some(backup_path) => {
+                    let backup_path = PathBuf::from(backup_path);
+                    let backup_bytes = fs::read(&backup_path)?;
+                    let backup_sha = format!("{:x}", Sha256::digest(&backup_bytes));
+                    if let Some(parent) = target_path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::copy(&backup_path, &target_path)?;
+                    let restored = fs::read(&target_path)?;
+                    let restored_sha = format!("{:x}", Sha256::digest(&restored));
+                    if restored_sha == backup_sha {
+                        payload.status = JournalOperationStatus::RolledBack;
+                        payload.written_sha256 = Some(restored_sha);
+                        payload.message = Some(
+                            "restored native session file from backup and checksum verified"
+                                .to_string(),
+                        );
+                    } else {
+                        payload.status = JournalOperationStatus::Failed;
+                        payload.message =
+                            Some("restored native session checksum mismatch".to_string());
+                        rolled_back.status = JournalStatus::Failed;
+                    }
+                }
+                None => {
+                    if target_path.exists() {
+                        let current = fs::read(&target_path)?;
+                        let current_sha = format!("{:x}", Sha256::digest(&current));
+                        if payload
+                            .written_sha256
+                            .as_deref()
+                            .is_some_and(|expected| expected != current_sha)
+                        {
+                            payload.status = JournalOperationStatus::Failed;
+                            payload.message = Some(
+                                "target native session file changed after import; rollback refused to delete it"
+                                    .to_string(),
+                            );
+                            rolled_back.status = JournalStatus::Failed;
+                            continue;
+                        }
+                        fs::remove_file(&target_path)?;
+                    }
+                    payload.status = JournalOperationStatus::RolledBack;
+                    payload.written_sha256 = None;
+                    payload.message = Some(
+                        "removed native session file that did not exist before import".to_string(),
+                    );
+                }
+            }
+        }
+    }
+
+    if rolled_back.records.iter().any(|record| {
+        record
+            .written_payloads
+            .iter()
+            .any(|payload| payload.status == JournalOperationStatus::Failed)
+    }) {
+        rolled_back.status = JournalStatus::Failed;
+    }
+
+    Ok(rolled_back)
+}
+
 fn can_apply_payload_operation(
     operation: &agent_sync_transform::ApplyOperation,
     options: &ApplyPayloadOptions,
@@ -1735,11 +1821,22 @@ mod tests {
             JournalOperationStatus::Verified
         );
         assert!(journal.records[0].written_payloads[0].backup_path.is_some());
-        let written_text = fs::read_to_string(target_file).unwrap();
+        let written_text = fs::read_to_string(&target_file).unwrap();
         assert!(written_text.contains(target_project));
         assert!(!written_text.contains(source_project));
         assert_eq!(
             fs::read_to_string(backup.read_dir().unwrap().next().unwrap().unwrap().path()).unwrap(),
+            "old native session"
+        );
+
+        let rollback = rollback_session_native_file_import_journal(&journal).unwrap();
+        assert_eq!(rollback.status, JournalStatus::RolledBack);
+        assert_eq!(
+            rollback.records[0].written_payloads[0].status,
+            JournalOperationStatus::RolledBack
+        );
+        assert_eq!(
+            fs::read_to_string(target_file).unwrap(),
             "old native session"
         );
         let _ = fs::remove_dir_all(root);
@@ -1835,6 +1932,48 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn rollback_native_session_import_removes_created_file() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-sync-native-created-rollback-{}",
+            Uuid::new_v4()
+        ));
+        let target_home = root.join("target-home");
+        let backup = root.join("backup");
+        let target_file = target_home
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("07")
+            .join("02")
+            .join("rollout.jsonl");
+
+        let bundle = codex_session_payload_bundle(b"new native session".to_vec());
+        let journal = import_session_payloads_to_native_files(
+            &bundle,
+            &SessionNativeFileImportOptions {
+                selected_session_ids: vec!["codex:session-1".into()],
+                target_home: target_home.clone(),
+                target_project: None,
+                backup_dir: backup,
+                rewrite_project_identity: true,
+                require_agents_stopped: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(journal.status, JournalStatus::Completed);
+        assert!(target_file.exists());
+        assert!(journal.records[0].written_payloads[0].backup_path.is_none());
+
+        let rollback = rollback_session_native_file_import_journal(&journal).unwrap();
+        assert_eq!(rollback.status, JournalStatus::RolledBack);
+        assert_eq!(
+            rollback.records[0].written_payloads[0].status,
+            JournalOperationStatus::RolledBack
+        );
+        assert!(!target_file.exists());
+        let _ = fs::remove_dir_all(root);
+    }
     #[test]
     fn blocks_native_session_import_when_agent_process_is_running() {
         let root =

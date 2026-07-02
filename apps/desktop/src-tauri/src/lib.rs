@@ -4,7 +4,7 @@ use agent_sync_apply::{
     SessionNativeFileImportOptions, SessionNativeImportStageJournal,
     SessionNativeImportStageOptions, apply_payloads, create_journal, import_session_archives,
     import_session_payloads_to_native_files, preflight, rollback_journal,
-    stage_session_native_import,
+    rollback_session_native_file_import_journal, stage_session_native_import,
 };
 use agent_sync_bundle::{
     BundleExportOptions, PayloadSelectionRef, SyncBundle, SyncBundleManifest, export_bundle,
@@ -234,6 +234,13 @@ fn import_session_payloads_to_native_files_command(
 }
 
 #[tauri::command]
+fn rollback_session_native_file_import_journal_command(
+    journal: SessionNativeFileImportJournal,
+) -> Result<SessionNativeFileImportJournal, String> {
+    rollback_session_native_file_import_journal(&journal).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn save_snapshot_to_store(db_path: String, snapshot: DeviceSnapshot) -> Result<String, String> {
     let store = AgentSyncStore::open(db_path).map_err(|error| error.to_string())?;
     store
@@ -266,6 +273,7 @@ pub fn run() {
             import_session_archives_command,
             stage_session_native_import_command,
             import_session_payloads_to_native_files_command,
+            rollback_session_native_file_import_journal_command,
             save_snapshot_to_store,
             list_store_records
         ])

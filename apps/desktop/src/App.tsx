@@ -475,6 +475,22 @@ export function App() {
     }
   }
 
+  async function rollbackSessionNativeFileImport() {
+    if (!sessionNativeFileJournal) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const nextJournal = await invoke<SessionNativeFileImportJournal>('rollback_session_native_file_import_journal_command', {
+        journal: sessionNativeFileJournal
+      });
+      setSessionNativeFileJournal(nextJournal);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function saveSnapshot() {
     if (!snapshot) return;
     setBusy(true);
@@ -989,6 +1005,9 @@ export function App() {
               <h2>Native file import journal</h2>
               <span>{sessionNativeFileJournal.id} · {sessionNativeFileJournal.status}</span>
             </div>
+            <button className="secondary" onClick={rollbackSessionNativeFileImport} disabled={busy || sessionNativeFileJournal.status === 'rolled_back'}>
+              Rollback native file import
+            </button>
             <div className="chips">
               <span className="chip safe_config">imported {sessionNativeFileJournal.imported}</span>
               <span className="chip">selected {sessionNativeFileJournal.selected}</span>

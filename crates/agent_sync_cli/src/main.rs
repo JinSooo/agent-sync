@@ -1,6 +1,7 @@
 use agent_sync_apply::{
-    OperationJournal, SessionNativeFileImportOptions, create_journal,
-    import_session_payloads_to_native_files, preflight, rollback_journal,
+    OperationJournal, SessionNativeFileImportJournal, SessionNativeFileImportOptions,
+    create_journal, import_session_payloads_to_native_files, preflight, rollback_journal,
+    rollback_session_native_file_import_journal,
 };
 use agent_sync_bundle::{
     BundleExportOptions, PayloadSelectionRef, export_bundle, manifest_from_snapshot,
@@ -103,6 +104,14 @@ fn main() -> anyhow::Result<()> {
             let rolled_back = rollback_journal(&journal)?;
             println!("{}", serde_json::to_string_pretty(&rolled_back)?);
         }
+        "rollback-native-session-journal" => {
+            let input = value_after(&args, "--input")
+                .unwrap_or_else(|| "agent-sync-native-session-journal.json".to_string());
+            let bytes = std::fs::read(input)?;
+            let journal: SessionNativeFileImportJournal = serde_json::from_slice(&bytes)?;
+            let rolled_back = rollback_session_native_file_import_journal(&journal)?;
+            println!("{}", serde_json::to_string_pretty(&rolled_back)?);
+        }
         "self-plan" => {
             let snapshot = scan_device(default_scan_options(&args))?;
             let plan = create_transform_plan(&snapshot, &snapshot, None);
@@ -115,7 +124,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|import-native-sessions|rollback-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check]"
+                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|import-native-sessions|rollback-journal|rollback-native-session-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check]"
             );
             std::process::exit(2);
         }
