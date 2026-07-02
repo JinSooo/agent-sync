@@ -202,6 +202,9 @@ fn collect_path(
     if !metadata.is_dir() || metadata.file_type().is_symlink() || depth >= options.max_depth {
         return Ok(());
     }
+    if should_prune_directory(path, options) {
+        return Ok(());
+    }
 
     let mut entries = match fs::read_dir(path) {
         Ok(entries) => entries.filter_map(Result::ok).collect::<Vec<_>>(),
@@ -246,6 +249,46 @@ fn collect_path(
     }
 
     Ok(())
+}
+
+fn should_prune_directory(path: &Path, options: &ScanOptions) -> bool {
+    let portable = portable_path(path, &options.home, &options.project);
+    let normalized = portable.replace('\\', "/").to_lowercase();
+    let segments = normalized
+        .split('/')
+        .map(|segment| segment.trim())
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+
+    if normalized.contains("/plugins/cache/")
+        || normalized.ends_with("/plugins/cache")
+        || normalized.contains("/.tmp/")
+        || normalized.ends_with("/.tmp")
+    {
+        return true;
+    }
+
+    segments.iter().any(|segment| {
+        matches!(
+            *segment,
+            "node_modules"
+                | "dist"
+                | "build"
+                | "out"
+                | "target"
+                | "vendor"
+                | ".git"
+                | "cache"
+                | "cached"
+                | "tmp"
+                | "temp"
+                | "logs"
+                | "log"
+                | "blob_storage"
+                | "gpucache"
+                | "code cache"
+        )
+    })
 }
 
 fn finding_record(
@@ -419,6 +462,58 @@ mod tests {
             finding.portable_path == "~/.codex/memories/guide.md"
                 && finding.safety_class == agent_sync_core::SafetyClass::MemoryKnowledge
         }));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn prunes_generated_cache_dependency_trees_but_keeps_directory_marker() {
+        let temp =
+            std::env::temp_dir().join(format!("agent-sync-scan-prune-{}", uuid::Uuid::new_v4()));
+        let home = temp.join("home");
+        let project = temp.join("project");
+        let leveldb_dir = home
+            .join(".codex")
+            .join("plugins")
+            .join("cache")
+            .join("example-plugin")
+            .join("node_modules")
+            .join("classic-level")
+            .join("deps")
+            .join("leveldb");
+        fs::create_dir_all(&leveldb_dir).unwrap();
+        fs::write(leveldb_dir.join("leveldb.gyp"), "generated dependency").unwrap();
+        fs::create_dir_all(&project).unwrap();
+
+        let snapshot = scan_device(ScanOptions {
+            home,
+            project,
+            max_depth: 12,
+            max_entries: 200,
+            agents: vec!["codex".into()],
+        })
+        .unwrap();
+        let codex = snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.id == "codex")
+            .unwrap();
+
+        assert!(codex.findings.iter().any(|finding| {
+            finding.portable_path == "~/.codex/plugins/cache"
+                && finding.kind == agent_sync_core::FileKind::Directory
+        }));
+        assert!(
+            !codex
+                .findings
+                .iter()
+                .any(|finding| finding.portable_path.contains("node_modules"))
+        );
+        assert!(
+            !codex
+                .findings
+                .iter()
+                .any(|finding| finding.portable_path.contains("leveldb.gyp"))
+        );
         let _ = fs::remove_dir_all(temp);
     }
 }

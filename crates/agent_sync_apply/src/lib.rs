@@ -1091,6 +1091,9 @@ pub fn session_native_import_readiness(
 
 fn native_session_store_kind(portable_path: &str) -> Option<NativeSessionStoreKind> {
     let lower = portable_path.to_lowercase();
+    if is_generated_or_dependency_store_path(&lower) {
+        return None;
+    }
     if !(lower.starts_with("~/.codex/")
         || lower.starts_with("~/.claude/")
         || lower.starts_with("<project>/.codex/")
@@ -1118,6 +1121,39 @@ fn native_session_store_kind(portable_path: &str) -> Option<NativeSessionStoreKi
     } else {
         None
     }
+}
+
+fn is_generated_or_dependency_store_path(lower_portable_path: &str) -> bool {
+    let segments = lower_portable_path
+        .split('/')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    lower_portable_path.contains("/plugins/cache/")
+        || lower_portable_path.ends_with("/plugins/cache")
+        || lower_portable_path.contains("/.tmp/")
+        || lower_portable_path.ends_with("/.tmp")
+        || segments.iter().any(|segment| {
+            matches!(
+                *segment,
+                "node_modules"
+                    | "dist"
+                    | "build"
+                    | "out"
+                    | "target"
+                    | "vendor"
+                    | ".git"
+                    | "cache"
+                    | "cached"
+                    | "tmp"
+                    | "temp"
+                    | "logs"
+                    | "log"
+                    | "blob_storage"
+                    | "gpucache"
+                    | "code cache"
+            )
+        })
 }
 
 fn project_remap_column_reason(column: &str) -> Option<(u8, String)> {
@@ -3785,6 +3821,91 @@ mod tests {
         assert_eq!(agent.sqlite_project_remap_candidates, 1);
         assert_eq!(agent.opaque_store_candidates, 1);
         assert!(agent.next_steps.iter().any(|step| step.contains("fixture")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compatibility_report_ignores_generated_plugin_dependency_stores() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-sync-native-generated-store-ignore-{}",
+            Uuid::new_v4()
+        ));
+        let home = root.join("home");
+        let project = root.join("project");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        let snapshot = agent_sync_core::DeviceSnapshot {
+            schema_version: "0.2".into(),
+            id: Uuid::new_v4(),
+            generated_at: Utc::now(),
+            platform: agent_sync_core::PlatformInfo {
+                os: "test".into(),
+                arch: "test".into(),
+            },
+            inputs: agent_sync_core::SnapshotInputs {
+                home: "~".into(),
+                project: project.display().to_string(),
+                max_depth: 12,
+                max_entries: 50,
+            },
+            summary: agent_sync_core::SnapshotSummary::default(),
+            projects: vec![],
+            agents: vec![agent_sync_core::AgentSnapshot {
+                id: "codex".into(),
+                name: "OpenAI Codex".into(),
+                detected: true,
+                capabilities: agent_sync_core::AdapterCapabilities {
+                    can_import_sessions: true,
+                    can_export_sessions: true,
+                    can_list_sessions: true,
+                    ..Default::default()
+                },
+                roots: vec![],
+                findings: vec![agent_sync_core::Finding {
+                    path: "~/.codex/plugins/cache/example/node_modules/classic-level/deps/leveldb"
+                        .into(),
+                    portable_path:
+                        "~/.codex/plugins/cache/example/node_modules/classic-level/deps/leveldb"
+                            .into(),
+                    kind: agent_sync_core::FileKind::Directory,
+                    depth: 8,
+                    size: None,
+                    mtime: None,
+                    safety_class: agent_sync_core::SafetyClass::Database,
+                    risk: agent_sync_core::RiskLevel::High,
+                    reason: "generated dependency fixture".into(),
+                    recommendation: "ignore generated cache dependency".into(),
+                    truncated: false,
+                }],
+                sessions: vec![],
+            }],
+        };
+
+        let discovery = discover_native_session_stores(
+            &snapshot,
+            &NativeSessionStoreDiscoveryOptions {
+                target_home: home.clone(),
+                target_project: project.clone(),
+                max_schema_tables: 10,
+            },
+        );
+        assert!(discovery.stores.is_empty());
+
+        let report = native_session_compatibility_report(
+            &snapshot,
+            &NativeSessionCompatibilityOptions {
+                target_home: home,
+                target_project: project,
+                max_schema_tables: 10,
+            },
+        );
+        assert_eq!(report.agents[0].opaque_store_candidates, 0);
+        assert!(
+            !report.agents[0]
+                .evidence
+                .iter()
+                .any(|evidence| evidence.contains("opaque DB/index"))
+        );
         let _ = fs::remove_dir_all(root);
     }
 

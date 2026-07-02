@@ -65,6 +65,31 @@ function findingRecord(filePath, stats, agentId, options, depth) {
   };
 }
 
+function shouldPruneDirectory(filePath, options) {
+  const portable = portablePath(filePath, options).split(path.sep).join('/').toLowerCase();
+  const segments = portable.split('/').map((segment) => segment.trim()).filter(Boolean);
+  if (portable.includes('/plugins/cache/') || portable.endsWith('/plugins/cache')) return true;
+  if (portable.includes('/.tmp/') || portable.endsWith('/.tmp')) return true;
+  return segments.some((segment) => [
+    'node_modules',
+    'dist',
+    'build',
+    'out',
+    'target',
+    'vendor',
+    '.git',
+    'cache',
+    'cached',
+    'tmp',
+    'temp',
+    'logs',
+    'log',
+    'blob_storage',
+    'gpucache',
+    'code cache'
+  ].includes(segment));
+}
+
 async function collectPath(filePath, options, agentId, depth = 0, results = []) {
   if (results.length >= options.maxEntries) return results;
   const stats = await lstatIfExists(filePath);
@@ -72,6 +97,7 @@ async function collectPath(filePath, options, agentId, depth = 0, results = []) 
 
   results.push(findingRecord(filePath, stats, agentId, options, depth));
   if (!stats.isDirectory() || stats.isSymbolicLink() || depth >= options.maxDepth) return results;
+  if (shouldPruneDirectory(filePath, options)) return results;
 
   let entries;
   try {

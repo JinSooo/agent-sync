@@ -109,7 +109,7 @@ fn detect_running_agent_processes_windows(
         if pid == current_pid {
             continue;
         }
-        if let Some(agent_id) = matching_agent_id(&executable, agent_ids) {
+        if let Some(agent_id) = matching_agent_process(&executable, &fields[0], agent_ids) {
             processes.push(RunningAgentProcess {
                 agent_id,
                 pid,

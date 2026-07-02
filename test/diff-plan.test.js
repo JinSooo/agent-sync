@@ -28,6 +28,9 @@ async function createMachine(root, name, options = {}) {
   if (options.withMcp) {
     await write(path.join(project, '.mcp.json'), '{"mcpServers":{"demo":{}}}\n');
   }
+  if (options.withSafeConfig) {
+    await write(path.join(home, '.codex', 'preferences.toml'), 'theme = "dark"\n');
+  }
   if (options.withCursorRule) {
     await write(path.join(project, '.cursor', 'rules', 'style.md'), '# rule\n');
   }
@@ -50,6 +53,7 @@ test('diff reports missing target findings using portable project paths', async 
   t.after(() => fs.rm(root, { recursive: true, force: true }));
 
   const source = await createMachine(root, 'source', {
+    withSafeConfig: true,
     withMcp: true,
     withCursorRule: true,
     withSession: true,
@@ -74,6 +78,7 @@ test('plan converts diff into safe, review, and blocked buckets', async (t) => {
   t.after(() => fs.rm(root, { recursive: true, force: true }));
 
   const source = await createMachine(root, 'source', {
+    withSafeConfig: true,
     withMcp: true,
     withCursorRule: true,
     withSession: true,
@@ -136,4 +141,23 @@ test('diff and plan CLI commands work with snapshot files', async (t) => {
   const plan = JSON.parse(planRun.stdout);
   assert.equal(plan.kind, 'agent-sync-plan');
   assert.ok(plan.summary.blocked > 0);
+});
+
+test('doctor prunes generated plugin dependency caches from inventory', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-sync-prune-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const home = path.join(root, 'home');
+  const project = path.join(root, 'project');
+  await write(
+    path.join(home, '.codex', 'plugins', 'cache', 'example', 'node_modules', 'classic-level', 'deps', 'leveldb', 'leveldb.gyp'),
+    'generated dependency\n'
+  );
+  await write(path.join(project, 'AGENTS.md'), '# instructions\n');
+
+  const manifest = await runDoctor({ home, project, maxDepth: 12, maxEntries: 200 });
+  const codex = manifest.agents.find((agent) => agent.id === 'codex');
+  assert.ok(codex.findings.some((finding) => finding.path === '~/.codex/plugins/cache'));
+  assert.ok(!codex.findings.some((finding) => finding.path.includes('node_modules')));
+  assert.ok(!codex.findings.some((finding) => finding.path.includes('leveldb.gyp')));
 });
