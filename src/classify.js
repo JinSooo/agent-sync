@@ -22,7 +22,13 @@ const CACHE_RE = /(^|[/._-])(cache|cached|tmp|temp|node_modules|dist|build|out|l
 const HOOK_RE = /(^|[/._-])(hook|hooks|scripts?|bin)([/._-]|$)/i;
 
 function normalizedPath(filePath) {
-  return filePath.split(path.sep).join('/');
+  return String(filePath).replace(/\\/g, '/');
+}
+
+function pathBaseName(filePath) {
+  const normalized = normalizedPath(filePath);
+  const parts = normalized.split('/').filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : normalized;
 }
 
 function fileKind(stats) {
@@ -34,7 +40,7 @@ function fileKind(stats) {
 
 export function classifyPath(filePath, stats, agentId = 'unknown') {
   const rel = normalizedPath(filePath);
-  const base = path.basename(filePath);
+  const base = pathBaseName(filePath);
   const ext = path.extname(base).toLowerCase();
   const kind = fileKind(stats);
 

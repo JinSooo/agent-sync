@@ -50,10 +50,11 @@ function rootRecord(filePath, scope, exists, options, note) {
 }
 
 function findingRecord(filePath, stats, agentId, options, depth) {
-  const classification = classifyPath(filePath, stats, agentId);
+  const portable = portablePath(filePath, options);
+  const classification = classifyPath(portable, stats, agentId);
   return {
-    path: portablePath(filePath, options),
-    portablePath: portablePath(filePath, options),
+    path: portable,
+    portablePath: portable,
     kind: stats.isDirectory() ? 'directory' : stats.isSymbolicLink() ? 'symlink' : stats.isFile() ? 'file' : 'other',
     depth,
     size: stats.isFile() ? stats.size : null,
@@ -66,7 +67,7 @@ function findingRecord(filePath, stats, agentId, options, depth) {
 }
 
 function shouldPruneDirectory(filePath, options) {
-  const portable = portablePath(filePath, options).split(path.sep).join('/').toLowerCase();
+  const portable = portablePath(filePath, options).replace(/\\/g, '/').toLowerCase();
   const segments = portable.split('/').map((segment) => segment.trim()).filter(Boolean);
   if (portable.includes('/plugins/cache/') || portable.endsWith('/plugins/cache')) return true;
   if (portable.includes('/.tmp/') || portable.endsWith('/.tmp')) return true;

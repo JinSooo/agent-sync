@@ -90,6 +90,7 @@ test('plan converts diff into safe, review, and blocked buckets', async (t) => {
 
   const plan = runPlan(source.manifest, target.manifest, { target: 'windows' });
   assert.ok(plan.summary.safeCandidates > 0);
+  assert.ok(plan.safeCandidates.some((item) => item.path === '~/.codex/preferences.toml'));
   assert.ok(plan.summary.reviewRequired > 0);
   assert.ok(plan.summary.blocked > 0);
   assert.ok(plan.blocked.some((item) => item.safetyClass === 'secret_bearing'));
