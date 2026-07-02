@@ -383,6 +383,7 @@ export function App() {
   const [verifyErrors, setVerifyErrors] = useState<string[]>([]);
   const [selectedOperationIds, setSelectedOperationIds] = useState<string[]>([]);
   const [selectedSessionIds, setSelectedSessionIds] = useState<string[]>([]);
+  const [sessionTargetProjectOverrides, setSessionTargetProjectOverrides] = useState<Record<string, string>>({});
   const [selectedLocalSessionIds, setSelectedLocalSessionIds] = useState<string[]>([]);
   const [selectedLocalReviewPayloadKeys, setSelectedLocalReviewPayloadKeys] = useState<string[]>([]);
   const [localSessionQuery, setLocalSessionQuery] = useState('');
@@ -493,6 +494,7 @@ export function App() {
       setRemoteSnapshot(bundle.source_snapshot);
       setVerifyErrors(errors);
       setSelectedSessionIds(bundle.session_archives.map((archive) => archive.session.id));
+      setSessionTargetProjectOverrides({});
       setPlan(null);
       setPreflight(null);
       setJournal(null);
@@ -582,11 +584,13 @@ export function App() {
     setBusy(true);
     setError(null);
     try {
+      const targetProjectBySession = selectedSessionTargetProjectOverrides(selectedSessionIds, sessionTargetProjectOverrides);
       const nextJournal = await invoke<SessionArchiveImportJournal>('import_session_archives_command', {
         bundle: importedBundle,
         dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
         selectedSessionIds,
-        targetProject: targetProjectPath || undefined
+        targetProject: targetProjectPath || undefined,
+        targetProjectBySession
       });
       setSessionArchiveJournal(nextJournal);
     } catch (err) {
@@ -601,10 +605,12 @@ export function App() {
     setBusy(true);
     setError(null);
     try {
+      const targetProjectBySession = selectedSessionTargetProjectOverrides(selectedSessionIds, sessionTargetProjectOverrides);
       const nextJournal = await invoke<SessionNativeImportStageJournal>('stage_session_native_import_command', {
         bundle: importedBundle,
         selectedSessionIds,
         targetProject: targetProjectPath || undefined,
+        targetProjectBySession,
         stagingDir: sessionStageDir || 'agent-sync-session-staging',
         rewriteProjectIdentity: true
       });
@@ -640,11 +646,13 @@ export function App() {
     setBusy(true);
     setError(null);
     try {
+      const targetProjectBySession = selectedSessionTargetProjectOverrides(selectedSessionIds, sessionTargetProjectOverrides);
       const nextJournal = await invoke<SessionNativeFileImportJournal>('import_session_payloads_to_native_files_command', {
         bundle: importedBundle,
         selectedSessionIds,
         targetHome: targetHomePath || undefined,
         targetProject: targetProjectPath || undefined,
+        targetProjectBySession,
         backupDir: backupDir || 'agent-sync-backups',
         rewriteProjectIdentity: true,
         requireAgentsStopped
@@ -976,6 +984,20 @@ export function App() {
     setSessionReadinessReport(null);
   }
 
+  function updateSessionTargetProjectOverride(sessionId: string, value: string) {
+    setSessionTargetProjectOverrides((current) => {
+      const next = { ...current };
+      const trimmed = value.trim();
+      if (trimmed) {
+        next[sessionId] = value;
+      } else {
+        delete next[sessionId];
+      }
+      return next;
+    });
+    setSessionReadinessReport(null);
+  }
+
   function toggleLocalSession(id: string) {
     setSelectedLocalSessionIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
   }
@@ -1023,6 +1045,10 @@ export function App() {
   const selectedRemoteArchives = useMemo(
     () => importedSessionArchives.filter((archive) => selectedSessionIds.includes(archive.session.id)),
     [importedSessionArchives, selectedSessionIds]
+  );
+  const selectedSessionTargetOverrideCount = useMemo(
+    () => Object.keys(selectedSessionTargetProjectOverrides(selectedSessionIds, sessionTargetProjectOverrides)).length,
+    [selectedSessionIds, sessionTargetProjectOverrides]
   );
   const selectedRemotePayloadCount = selectedRemoteArchives.reduce((count, archive) => count + archive.payloads.length, 0);
   const targetAgentCapabilities = (agentId: string) => (snapshot?.agents.find((agent) => agent.id === agentId)?.capabilities ?? importedBundle?.source_snapshot.agents.find((agent) => agent.id === agentId)?.capabilities ?? emptyCapabilities());
@@ -1275,7 +1301,7 @@ export function App() {
         <section className="panel">
           <div className="panelTitle">
             <h2>Session Library</h2>
-            <span>{selectedSessionIds.length} selected · {filteredImportedSessionArchives.length}/{importedSessionArchives.length} visible · {selectedRemotePayloadCount} payloads</span>
+            <span>{selectedSessionIds.length} selected · {filteredImportedSessionArchives.length}/{importedSessionArchives.length} visible · {selectedRemotePayloadCount} payloads · {selectedSessionTargetOverrideCount} target override(s)</span>
           </div>
           {importedSessionArchives.length ? (
             <div className="stack">
@@ -1311,6 +1337,16 @@ export function App() {
                       </small>
                       <small>{archive.session.id}</small>
                       <small>{archive.import_note}</small>
+                      <span className="inlineField">
+                        <span>Target project for this session</span>
+                        <input
+                          value={sessionTargetProjectOverrides[archive.session.id] ?? ''}
+                          onChange={(event) => updateSessionTargetProjectOverride(archive.session.id, event.target.value)}
+                          placeholder={targetProjectPath || 'Use global target project path unless overridden'}
+                          onClick={(event) => event.stopPropagation()}
+                        />
+                        <small>Effective target: {sessionTargetProjectOverrides[archive.session.id]?.trim() || targetProjectPath || 'not set'}</small>
+                      </span>
                     </span>
                   </label>
                 ))}
@@ -1752,6 +1788,15 @@ function bundleRecipientInputsToArray(value: string): string[] {
     .split(/[\n,;]/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function selectedSessionTargetProjectOverrides(selectedSessionIds: string[], overrides: Record<string, string>): Record<string, string> {
+  const selected = new Set(selectedSessionIds);
+  return Object.fromEntries(
+    Object.entries(overrides)
+      .map(([sessionId, targetProject]) => [sessionId, targetProject.trim()] as const)
+      .filter(([sessionId, targetProject]) => selected.has(sessionId) && targetProject.length > 0)
+  );
 }
 
 function matchesLocalSession(row: { agent: AgentSnapshot; session: SessionRecord }, query: string): boolean {

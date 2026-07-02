@@ -88,6 +88,8 @@ pub struct ApplyPayloadOptions {
 pub struct SessionArchiveImportOptions {
     pub selected_session_ids: Vec<String>,
     pub target_project: Option<String>,
+    #[serde(default)]
+    pub target_project_by_session: BTreeMap<String, String>,
     pub target_project_id: Option<Uuid>,
 }
 
@@ -121,6 +123,8 @@ pub struct SessionArchiveImportRecord {
 pub struct SessionNativeImportStageOptions {
     pub selected_session_ids: Vec<String>,
     pub target_project: Option<String>,
+    #[serde(default)]
+    pub target_project_by_session: BTreeMap<String, String>,
     pub staging_dir: PathBuf,
     pub rewrite_project_identity: bool,
 }
@@ -164,6 +168,8 @@ pub struct SessionNativeFileImportOptions {
     pub selected_session_ids: Vec<String>,
     pub target_home: PathBuf,
     pub target_project: Option<String>,
+    #[serde(default)]
+    pub target_project_by_session: BTreeMap<String, String>,
     pub backup_dir: PathBuf,
     pub rewrite_project_identity: bool,
     pub require_agents_stopped: bool,
@@ -950,6 +956,11 @@ pub fn import_session_archives(
         {
             continue;
         }
+        let target_project = target_project_for_session(
+            options.target_project.as_deref(),
+            &options.target_project_by_session,
+            archive.session.id.as_str(),
+        );
         let record = SessionArchiveImportRecord {
             record_id: String::new(),
             agent_id: archive.agent_id.clone(),
@@ -960,7 +971,7 @@ pub fn import_session_archives(
                 .source_project
                 .as_ref()
                 .map(|project| project.canonical_path.clone()),
-            target_project: options.target_project.clone(),
+            target_project,
             payload_included: archive.payload_included,
             note: if archive.payload_included {
                 "raw payload archived for adapter-specific import".to_string()
@@ -1008,6 +1019,11 @@ pub fn stage_session_native_import(
         if archive.payloads.is_empty() {
             continue;
         }
+        let target_project = target_project_for_session(
+            options.target_project.as_deref(),
+            &options.target_project_by_session,
+            archive.session.id.as_str(),
+        );
 
         let session_dir = options
             .staging_dir
@@ -1037,7 +1053,7 @@ pub fn stage_session_native_import(
                     .source_project
                     .as_ref()
                     .and_then(|project| project.physical_path.as_deref()),
-                options.target_project.as_deref(),
+                target_project.as_deref(),
                 options.rewrite_project_identity,
             );
             let staged_sha = format!("{:x}", Sha256::digest(&next_bytes));
@@ -1061,7 +1077,7 @@ pub fn stage_session_native_import(
                 .source_project
                 .as_ref()
                 .map(|project| project.canonical_path.clone()),
-            target_project: options.target_project.clone(),
+            target_project,
             written_payloads,
             note: "staged only; native Codex/Claude index/database write is not performed"
                 .to_string(),
@@ -1133,6 +1149,11 @@ pub fn import_session_payloads_to_native_files_with_processes(
         if archive.payloads.is_empty() {
             continue;
         }
+        let target_project = target_project_for_session(
+            options.target_project.as_deref(),
+            &options.target_project_by_session,
+            archive.session.id.as_str(),
+        );
 
         let mut written_payloads = Vec::new();
         for payload in &archive.payloads {
@@ -1185,7 +1206,7 @@ pub fn import_session_payloads_to_native_files_with_processes(
                     .source_project
                     .as_ref()
                     .and_then(|project| project.physical_path.as_deref()),
-                options.target_project.as_deref(),
+                target_project.as_deref(),
                 options.rewrite_project_identity,
             );
             let written_sha = format!("{:x}", Sha256::digest(&next_bytes));
@@ -1242,7 +1263,7 @@ pub fn import_session_payloads_to_native_files_with_processes(
                 .source_project
                 .as_ref()
                 .map(|project| project.canonical_path.clone()),
-            target_project: options.target_project.clone(),
+            target_project,
             written_payloads,
             note: "native file import only; Codex/Claude databases and secondary indexes are not modified"
                 .to_string(),
@@ -1281,6 +1302,24 @@ pub fn import_session_payloads_to_native_files_with_processes(
             JournalStatus::Completed
         },
     })
+}
+
+fn target_project_for_session(
+    global_target_project: Option<&str>,
+    target_project_by_session: &BTreeMap<String, String>,
+    session_id: &str,
+) -> Option<String> {
+    target_project_by_session
+        .get(session_id)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            global_target_project
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
 }
 
 fn session_import_capabilities_as_adapter(
@@ -1558,6 +1597,11 @@ fn blocked_session_native_file_import_journal(
         {
             continue;
         }
+        let target_project = target_project_for_session(
+            options.target_project.as_deref(),
+            &options.target_project_by_session,
+            archive.session.id.as_str(),
+        );
 
         let written_payloads = archive
             .payloads
@@ -1593,7 +1637,7 @@ fn blocked_session_native_file_import_journal(
                 .source_project
                 .as_ref()
                 .map(|project| project.canonical_path.clone()),
-            target_project: options.target_project.clone(),
+            target_project,
             written_payloads,
             note: "blocked before writing because native session import requires target agents to be stopped"
                 .to_string(),
@@ -2601,6 +2645,10 @@ mod tests {
             &SessionArchiveImportOptions {
                 selected_session_ids: vec!["codex:session-1".into()],
                 target_project: Some("/target/project".into()),
+                target_project_by_session: BTreeMap::from([(
+                    "codex:session-1".into(),
+                    "/session/project".into(),
+                )]),
                 target_project_id: None,
             },
         )
@@ -2610,7 +2658,7 @@ mod tests {
         assert_eq!(journal.skipped, 0);
         assert_eq!(
             journal.records[0].target_project.as_deref(),
-            Some("/target/project")
+            Some("/session/project")
         );
         assert_eq!(store.list("session_archive").unwrap().len(), 1);
     }
@@ -2621,6 +2669,7 @@ mod tests {
         let staging = root.join("staging");
         let source_project = "/Users/me/source-project";
         let target_project = "C:/Users/me/target-project";
+        let global_target_project = "C:/Users/me/global-target-project";
         let bytes = format!("{{\"cwd\":\"{}\",\"text\":\"hello\"}}\n", source_project).into_bytes();
         let sha = format!("{:x}", Sha256::digest(&bytes));
         let session = agent_sync_core::SessionRecord {
@@ -2695,7 +2744,11 @@ mod tests {
             &bundle,
             &SessionNativeImportStageOptions {
                 selected_session_ids: vec!["codex:session-1".into()],
-                target_project: Some(target_project.into()),
+                target_project: Some(global_target_project.into()),
+                target_project_by_session: BTreeMap::from([(
+                    "codex:session-1".into(),
+                    target_project.into(),
+                )]),
                 staging_dir: staging.clone(),
                 rewrite_project_identity: true,
             },
@@ -2708,6 +2761,7 @@ mod tests {
             fs::read_to_string(&journal.records[0].written_payloads[0].staged_path).unwrap();
         assert!(staged_text.contains(target_project));
         assert!(!staged_text.contains(source_project));
+        assert!(!staged_text.contains(global_target_project));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2718,6 +2772,7 @@ mod tests {
         let backup = root.join("backup");
         let source_project = "/Users/me/source-project";
         let target_project = "C:/Users/me/target-project";
+        let global_target_project = "C:/Users/me/global-target-project";
         let target_file = target_home
             .join(".codex")
             .join("sessions")
@@ -2803,7 +2858,11 @@ mod tests {
             &SessionNativeFileImportOptions {
                 selected_session_ids: vec!["codex:session-1".into()],
                 target_home: target_home.clone(),
-                target_project: Some(target_project.into()),
+                target_project: Some(global_target_project.into()),
+                target_project_by_session: BTreeMap::from([(
+                    "codex:session-1".into(),
+                    target_project.into(),
+                )]),
                 backup_dir: backup.clone(),
                 rewrite_project_identity: true,
                 require_agents_stopped: false,
@@ -2821,6 +2880,11 @@ mod tests {
         let written_text = fs::read_to_string(&target_file).unwrap();
         assert!(written_text.contains(target_project));
         assert!(!written_text.contains(source_project));
+        assert!(!written_text.contains(global_target_project));
+        assert_eq!(
+            journal.records[0].target_project.as_deref(),
+            Some(target_project)
+        );
         assert_eq!(
             fs::read_to_string(backup.read_dir().unwrap().next().unwrap().unwrap().path()).unwrap(),
             "old native session"
@@ -2912,6 +2976,7 @@ mod tests {
                 selected_session_ids: vec!["codex:session-1".into()],
                 target_home,
                 target_project: None,
+                target_project_by_session: BTreeMap::new(),
                 backup_dir: backup,
                 rewrite_project_identity: true,
                 require_agents_stopped: false,
@@ -2952,6 +3017,7 @@ mod tests {
                 selected_session_ids: vec!["codex:session-1".into()],
                 target_home: target_home.clone(),
                 target_project: None,
+                target_project_by_session: BTreeMap::new(),
                 backup_dir: backup,
                 rewrite_project_identity: true,
                 require_agents_stopped: false,
@@ -2994,6 +3060,7 @@ mod tests {
                 selected_session_ids: vec!["codex:session-1".into()],
                 target_home: target_home.clone(),
                 target_project: None,
+                target_project_by_session: BTreeMap::new(),
                 backup_dir: backup,
                 rewrite_project_identity: true,
                 require_agents_stopped: true,
@@ -3043,6 +3110,7 @@ mod tests {
                 selected_session_ids: vec!["codex:session-1".into()],
                 target_home: target_home.clone(),
                 target_project: None,
+                target_project_by_session: BTreeMap::new(),
                 backup_dir: backup,
                 rewrite_project_identity: true,
                 require_agents_stopped: false,

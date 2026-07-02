@@ -30,8 +30,8 @@ The older Node CLI remains available as a legacy reference while the Rust/Tauri 
 - Select auto-safe operations visually.
 - Choose memory/rules/prompts and MCP config payloads for explicit review export, then apply selected review payloads only after an acknowledgement gate.
 - Search/filter local Codex/Claude sessions and memory/MCP payloads, then choose exactly which raw session payloads or review-required payloads should be included in the next bundle; raw session selection remains gated by adapter export capability.
-- Search/filter remote Codex/Claude session archives and import selected archives into the local Agent Sync Studio archive store with target-project mapping; native-file actions are gated by adapter import capability.
-- Stage selected raw session payloads into an isolated native-import directory with optional source-project to target-project path rewriting.
+- Search/filter remote Codex/Claude session archives and import selected archives into the local Agent Sync Studio archive store with global or per-session target-project mapping; native-file actions are gated by adapter import capability.
+- Stage selected raw session payloads into an isolated native-import directory with optional source-project to target-project path rewriting; per-session target-project overrides win over the global target path.
 - Check native session import readiness before writing, including raw-payload presence, adapter capability, stopped-agent preflight posture, rollback limits, and DB/index remap gaps.
 - Discover native Codex/Claude DB/index store candidates in read-only mode, including SQLite table/column schema summaries without row contents.
 - Preview likely SQLite project-remap columns for native Codex/Claude DB/index stores in schema-only mode; the preview reports confidence without reading rows, and writes only happen through the separate explicit apply step.
@@ -60,6 +60,8 @@ cargo run -p agent_sync_cli -- preview-native-remap --home "$HOME" --project "$P
 cargo run -p agent_sync_cli -- apply-native-remap --home "$HOME" --project "$PWD" --source-project "/source/project" --candidate 'codex|~/.codex/state/sessions.db|conversations|project_path' --backup-dir agent-sync-backups
 cargo run -p agent_sync_cli -- rollback-native-remap-journal --input agent-sync-native-remap-journal.json
 AGENT_SYNC_BUNDLE_KEY="agent-sync-device-key.json" cargo run -p agent_sync_cli -- import-native-sessions --input agent-sync-sessions.asbundle --target-home "$HOME" --target-project "$PWD" --backup-dir agent-sync-backups --session "codex:~/.codex/sessions/YYYY/MM/DD/session.jsonl"
+# Copy one selected conversation into a different target project identity than the global default:
+AGENT_SYNC_BUNDLE_KEY="agent-sync-device-key.json" cargo run -p agent_sync_cli -- import-native-sessions --input agent-sync-sessions.asbundle --target-home "$HOME" --target-project "$PWD" --backup-dir agent-sync-backups --session "codex:~/.codex/sessions/YYYY/MM/DD/session.jsonl" --session-target "codex:~/.codex/sessions/YYYY/MM/DD/session.jsonl=/other/project"
 # Explicit override when you have manually accepted the risk of importing while the target agent may be running:
 AGENT_SYNC_BUNDLE_KEY="agent-sync-device-key.json" cargo run -p agent_sync_cli -- import-native-sessions --input agent-sync-sessions.asbundle --target-home "$HOME" --target-project "$PWD" --backup-dir agent-sync-backups --session "codex:~/.codex/sessions/YYYY/MM/DD/session.jsonl" --skip-agent-stopped-check
 cargo run -p agent_sync_cli -- rollback-journal --input agent-sync-journal.json
@@ -100,12 +102,12 @@ Automatically applicable today:
 - explicitly selected `memory_knowledge` and `mcp_config` text payloads from a verified bundle, only after the review-acknowledgement gate, with backup and checksum verification.
 - apply journal rollback for backup-backed changes and files created by the apply.
 - automatic apply-journal and native session import-journal persistence into the local SQLite store, with UI loading of stored rollback points.
-- metadata-only session archive records into Agent Sync Studio SQLite storage.
-- selected raw session payloads into an isolated staging directory with project-path rewrite journal.
+- metadata-only session archive records into Agent Sync Studio SQLite storage, including per-session target-project metadata when the user overrides the global target.
+- selected raw session payloads into an isolated staging directory with project-path rewrite journal; per-session target overrides are recorded in the stage journal.
 - native session import readiness reports in desktop and CLI that are read-only and explicitly warn when the current adapter supports native-file import but not Codex/Claude DB/index project remap.
 - read-only native session store discovery in desktop and CLI, including SQLite schema metadata only; this is evidence gathering for future DB/index remap and does not write native stores.
 - read-only native DB/index project-remap preview in desktop and CLI, using SQLite schema column names only. It does not read database rows, does not mutate native stores, and reports every candidate with `write_supported=false`.
 - explicitly selected SQLite DB project-remap candidates in desktop and CLI, with exact `source_project` matching, whole-DB backup, SQLite transaction, row-count journal, stopped-agent preflight by default, local journal persistence, and rollback by restoring the DB backup. The UI exposes candidate checkboxes after preview; the CLI requires `--candidate 'AGENT|PORTABLE|TABLE|COLUMN'`. LevelDB/IndexedDB and unknown native stores remain preview-only.
-- selected raw session payloads into native Codex/Claude file locations under a chosen target home, with strict `~/.codex/**` / `~/.claude/**` allowlisting, adapter capability gating, default Codex/Claude stopped-agent preflight, backup, optional project-path rewrite, checksum verification, and rollback from the native import journal. The UI exposes an explicit manual override and the CLI exposes `--skip-agent-stopped-check`; this does not rewrite opaque native Codex/Claude databases or secondary indexes, and the adapter capability model does not claim broad DB/index remap support until fixtures prove it.
+- selected raw session payloads into native Codex/Claude file locations under a chosen target home, with strict `~/.codex/**` / `~/.claude/**` allowlisting, adapter capability gating, default Codex/Claude stopped-agent preflight, backup, optional project-path rewrite, per-session target-project override (`--session-target SESSION_ID=PROJECT_PATH` in CLI), checksum verification, and rollback from the native import journal. The UI exposes per-session target inputs plus an explicit manual stopped-agent override, and the CLI exposes `--skip-agent-stopped-check`; this does not rewrite opaque native Codex/Claude databases or secondary indexes, and the adapter capability model does not claim broad DB/index remap support until fixtures prove it.
 
 See `.omx/plans/agent-sync-studio-full-architecture-20260701.md` and `docs/agent-sync-studio-architecture.md` for the full implementation architecture.

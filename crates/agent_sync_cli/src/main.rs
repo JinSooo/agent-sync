@@ -17,6 +17,7 @@ use agent_sync_bundle::{
 };
 use agent_sync_scan::{ScanOptions, scan_device};
 use agent_sync_transform::create_transform_plan;
+use std::collections::BTreeMap;
 use std::env;
 use std::path::PathBuf;
 
@@ -189,6 +190,7 @@ fn main() -> anyhow::Result<()> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("agent-sync-backups"));
             let selected_session_ids = values_after(&args, "--session");
+            let target_project_by_session = session_target_project_values(&args)?;
             let bundle = read_bundle_file_with_decryption(input, &decryption)?;
             let journal = import_session_payloads_to_native_files(
                 &bundle,
@@ -196,6 +198,7 @@ fn main() -> anyhow::Result<()> {
                     selected_session_ids,
                     target_home,
                     target_project,
+                    target_project_by_session,
                     backup_dir,
                     rewrite_project_identity: !args
                         .iter()
@@ -243,7 +246,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|export-bundle-recipient|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH|--bundle-recipient AGE_OR_JSON --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
+                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|export-bundle-recipient|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH|--bundle-recipient AGE_OR_JSON --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --session-target SESSION_ID=PROJECT_PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
             );
             std::process::exit(2);
         }
@@ -308,6 +311,22 @@ fn values_after(args: &[String], flag: &str) -> Vec<String> {
         }
     }
     values
+}
+
+fn session_target_project_values(args: &[String]) -> anyhow::Result<BTreeMap<String, String>> {
+    let mut values = BTreeMap::new();
+    for value in values_after(args, "--session-target") {
+        let Some((session_id, project)) = value.split_once('=') else {
+            anyhow::bail!("--session-target must be SESSION_ID=PROJECT_PATH");
+        };
+        let session_id = session_id.trim();
+        let project = project.trim();
+        if session_id.is_empty() || project.is_empty() {
+            anyhow::bail!("--session-target must include non-empty session id and project path");
+        }
+        values.insert(session_id.to_string(), project.to_string());
+    }
+    Ok(values)
 }
 
 fn bundle_passphrase(args: &[String]) -> Option<String> {

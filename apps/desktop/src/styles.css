@@ -71,6 +71,8 @@ input:focus, textarea:focus { border-color: rgba(110,231,255,.55); box-shadow: 0
 .operationItem input { width: 16px; height: 16px; margin-top: 3px; }
 .operationItem strong { color: #e5edf7; }
 .operationItem small, .preflight small { display: block; margin-top: 4px; color: #8ea0b8; }
+.operationItem .inlineField { display: grid; gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,.06); color: #9fb1ca; font-size: 12px; }
+.operationItem .inlineField input { width: 100%; height: auto; margin-top: 0; }
 .operationList { overflow-wrap: anywhere; }
 @media (max-width: 1240px) {
   .hero, .two { grid-template-columns: 1fr; }

@@ -25,6 +25,7 @@ use agent_sync_core::DeviceSnapshot;
 use agent_sync_scan::{ScanOptions, scan_device as scan_device_core};
 use agent_sync_storage::{AgentSyncStore, StoredRecord};
 use agent_sync_transform::{SnapshotDiff, TransformPlan, create_transform_plan, diff_snapshots};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[tauri::command]
@@ -249,6 +250,7 @@ fn import_session_archives_command(
     db_path: String,
     selected_session_ids: Vec<String>,
     target_project: Option<String>,
+    target_project_by_session: Option<BTreeMap<String, String>>,
 ) -> Result<SessionArchiveImportJournal, String> {
     let store = AgentSyncStore::open(db_path).map_err(|error| error.to_string())?;
     import_session_archives(
@@ -257,6 +259,7 @@ fn import_session_archives_command(
         &SessionArchiveImportOptions {
             selected_session_ids,
             target_project,
+            target_project_by_session: target_project_by_session.unwrap_or_default(),
             target_project_id: None,
         },
     )
@@ -268,6 +271,7 @@ fn stage_session_native_import_command(
     bundle: SyncBundle,
     selected_session_ids: Vec<String>,
     target_project: Option<String>,
+    target_project_by_session: Option<BTreeMap<String, String>>,
     staging_dir: String,
     rewrite_project_identity: Option<bool>,
 ) -> Result<SessionNativeImportStageJournal, String> {
@@ -276,6 +280,7 @@ fn stage_session_native_import_command(
         &SessionNativeImportStageOptions {
             selected_session_ids,
             target_project,
+            target_project_by_session: target_project_by_session.unwrap_or_default(),
             staging_dir: PathBuf::from(staging_dir),
             rewrite_project_identity: rewrite_project_identity.unwrap_or(true),
         },
@@ -397,6 +402,7 @@ fn import_session_payloads_to_native_files_command(
     selected_session_ids: Vec<String>,
     target_home: Option<String>,
     target_project: Option<String>,
+    target_project_by_session: Option<BTreeMap<String, String>>,
     backup_dir: String,
     rewrite_project_identity: Option<bool>,
     require_agents_stopped: Option<bool>,
@@ -411,6 +417,7 @@ fn import_session_payloads_to_native_files_command(
             selected_session_ids,
             target_home,
             target_project,
+            target_project_by_session: target_project_by_session.unwrap_or_default(),
             backup_dir: PathBuf::from(backup_dir),
             rewrite_project_identity: rewrite_project_identity.unwrap_or(true),
             require_agents_stopped: require_agents_stopped.unwrap_or(true),
