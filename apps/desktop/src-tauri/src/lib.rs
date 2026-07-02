@@ -24,8 +24,8 @@ use agent_sync_bundle::{
     export_bundle_device_key_keyring_backup, generate_bundle_device_key_file,
     generate_bundle_device_key_keyring, manifest_from_snapshot, read_bundle_device_key_file,
     read_bundle_device_key_keyring, read_bundle_file_with_decryption,
-    restore_bundle_device_key_keyring_backup, verify_bundle, write_bundle_file_with_encryption,
-    write_bundle_recipient_file,
+    restore_bundle_device_key_keyring_backup, revoke_bundle_recipient_profile, verify_bundle,
+    write_bundle_file_with_encryption, write_bundle_recipient_file,
 };
 use agent_sync_core::DeviceSnapshot;
 use agent_sync_scan::{ScanOptions, scan_device as scan_device_core};
@@ -585,6 +585,25 @@ fn bundle_recipient_rotation_plan_command(
     ))
 }
 
+#[tauri::command]
+fn revoke_bundle_recipient_profile_command(
+    db_path: String,
+    id: String,
+    note: Option<String>,
+) -> Result<BundleRecipientProfile, String> {
+    let profiles = list_bundle_recipient_profiles(db_path.clone())?;
+    let profile = profiles
+        .iter()
+        .find(|profile| profile.id.to_string() == id)
+        .ok_or_else(|| format!("bundle recipient profile not found: {id}"))?;
+    let revoked = revoke_bundle_recipient_profile(profile, note);
+    let store = AgentSyncStore::open(db_path).map_err(|error| error.to_string())?;
+    store
+        .save_json(BUNDLE_RECIPIENT_PROFILE_KIND, Some(revoked.id), &revoked)
+        .map_err(|error| error.to_string())?;
+    Ok(revoked)
+}
+
 fn nonempty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.is_empty())
 }
@@ -701,7 +720,8 @@ pub fn run() {
             delete_store_record,
             save_bundle_recipient_profile,
             list_bundle_recipient_profiles,
-            bundle_recipient_rotation_plan_command
+            bundle_recipient_rotation_plan_command,
+            revoke_bundle_recipient_profile_command
         ])
         .run(tauri::generate_context!())
         .expect("error while running Agent Sync Studio");

@@ -17,8 +17,8 @@ use agent_sync_bundle::{
     delete_bundle_device_key_keyring, export_bundle, export_bundle_device_key_keyring_backup,
     generate_bundle_device_key_file, generate_bundle_device_key_keyring, manifest_from_snapshot,
     read_bundle_device_key_file, read_bundle_device_key_keyring, read_bundle_file_with_decryption,
-    restore_bundle_device_key_keyring_backup, verify_bundle, write_bundle_file_with_encryption,
-    write_bundle_recipient_file,
+    restore_bundle_device_key_keyring_backup, revoke_bundle_recipient_profile, verify_bundle,
+    write_bundle_file_with_encryption, write_bundle_recipient_file,
 };
 use agent_sync_scan::{ScanOptions, scan_device};
 use agent_sync_storage::AgentSyncStore;
@@ -131,6 +131,18 @@ fn main() -> anyhow::Result<()> {
             let profiles = load_bundle_recipient_profiles(&args)?;
             let plan = bundle_recipient_rotation_plan(&profiles, stale_after_days(&args)?);
             println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        "revoke-bundle-recipient-profile" => {
+            let id = value_after(&args, "--id")
+                .ok_or_else(|| anyhow::anyhow!("--id PROFILE_ID is required"))?;
+            let profiles = load_bundle_recipient_profiles(&args)?;
+            let Some(profile) = profiles.iter().find(|profile| profile.id.to_string() == id) else {
+                anyhow::bail!("bundle recipient profile not found: {id}");
+            };
+            let revoked = revoke_bundle_recipient_profile(profile, value_after(&args, "--note"));
+            let store = AgentSyncStore::open(store_path(&args))?;
+            store.save_json(BUNDLE_RECIPIENT_PROFILE_KIND, Some(revoked.id), &revoked)?;
+            println!("{}", serde_json::to_string_pretty(&revoked)?);
         }
         "forget-bundle-recipient-profile" => {
             let id = value_after(&args, "--id")
@@ -349,7 +361,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|generate-bundle-keychain|export-bundle-recipient|export-bundle-keychain-recipient|forget-bundle-keychain|export-bundle-keychain-backup|restore-bundle-keychain-backup|save-bundle-recipient-profile|list-bundle-recipient-profiles|bundle-recipient-rotation-plan|forget-bundle-recipient-profile|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|dry-run-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--store PATH] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH|--bundle-keychain ACCOUNT|--bundle-recipient AGE_OR_JSON|--bundle-recipient-profile PROFILE_ID --allow-unencrypted-sensitive-payloads] [--backup-passphrase PASSPHRASE] [--stale-days N] [--target-home PATH --target-project PATH --session-target SESSION_ID=PROJECT_PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
+                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|generate-bundle-keychain|export-bundle-recipient|export-bundle-keychain-recipient|forget-bundle-keychain|export-bundle-keychain-backup|restore-bundle-keychain-backup|save-bundle-recipient-profile|list-bundle-recipient-profiles|bundle-recipient-rotation-plan|revoke-bundle-recipient-profile|forget-bundle-recipient-profile|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|dry-run-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--store PATH] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH|--bundle-keychain ACCOUNT|--bundle-recipient AGE_OR_JSON|--bundle-recipient-profile PROFILE_ID --allow-unencrypted-sensitive-payloads] [--backup-passphrase PASSPHRASE] [--stale-days N] [--id PROFILE_ID --note TEXT] [--target-home PATH --target-project PATH --session-target SESSION_ID=PROJECT_PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
             );
             std::process::exit(2);
         }

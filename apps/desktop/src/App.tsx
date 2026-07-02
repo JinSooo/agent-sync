@@ -1260,6 +1260,25 @@ export function App() {
     }
   }
 
+  async function revokeRecipientProfile(profile: BundleRecipientProfile) {
+    setBusy(true);
+    setError(null);
+    try {
+      const revoked = await invoke<BundleRecipientProfile>('revoke_bundle_recipient_profile_command', {
+        dbPath: archiveStorePath || 'agent-sync-studio.sqlite',
+        id: profile.id,
+        note: 'confirmed local rotation/revocation'
+      });
+      setSelectedRecipientProfileIds((current) => current.filter((id) => id !== profile.id));
+      setStoreMessage(`trusted recipient marked revoked locally: ${revoked.label}`);
+      await refreshRecipientProfiles();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function chooseTargetProject() {
     const selected = await open({ directory: true, multiple: false });
     const path = singlePath(selected);
@@ -1619,6 +1638,12 @@ export function App() {
                               </>
                             );
                           })()}
+                          {!profile.revoked && (
+                            <button type="button" className="secondary smallButton" onClick={(event) => {
+                              event.preventDefault();
+                              void revokeRecipientProfile(profile);
+                            }} disabled={busy}>Mark revoked</button>
+                          )}
                           <button type="button" className="secondary dangerButton smallButton" onClick={(event) => {
                             event.preventDefault();
                             void forgetRecipientProfile(profile);

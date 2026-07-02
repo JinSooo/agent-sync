@@ -726,6 +726,22 @@ pub fn bundle_recipient_profile_from_input(
     })
 }
 
+pub fn revoke_bundle_recipient_profile(
+    profile: &BundleRecipientProfile,
+    note: Option<String>,
+) -> BundleRecipientProfile {
+    let mut revoked = profile.clone();
+    revoked.revoked = true;
+    revoked.updated_at = Utc::now();
+    if let Some(note) = trimmed_optional(note) {
+        revoked.note = Some(match revoked.note {
+            Some(existing) if !existing.trim().is_empty() => format!("{existing}; revoked: {note}"),
+            _ => format!("revoked: {note}"),
+        });
+    }
+    revoked
+}
+
 pub fn bundle_recipient_rotation_plan(
     profiles: &[BundleRecipientProfile],
     stale_after_days: i64,
@@ -1131,6 +1147,33 @@ mod tests {
                 .recommended_actions
                 .iter()
                 .any(|action| action.contains("new trusted profile"))
+        );
+    }
+
+    #[test]
+    fn revokes_recipient_profile_without_losing_audit_metadata() {
+        let key = generate_bundle_device_key();
+        let profile = bundle_recipient_profile_from_input(
+            "Windows desktop",
+            Some("win-dev".into()),
+            Some("windows".into()),
+            &key.age_recipient,
+            Some("paired during setup".into()),
+            Some("test".into()),
+        )
+        .unwrap();
+
+        let revoked = revoke_bundle_recipient_profile(&profile, Some("rotated on remote".into()));
+        assert!(revoked.revoked);
+        assert_eq!(revoked.id, profile.id);
+        assert_eq!(revoked.age_recipient, profile.age_recipient);
+        assert!(revoked.updated_at >= profile.updated_at);
+        assert!(
+            revoked
+                .note
+                .as_deref()
+                .unwrap_or_default()
+                .contains("rotated on remote")
         );
     }
 
