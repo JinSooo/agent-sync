@@ -7,6 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+const BUNDLE_ENCRYPTION_METHOD_AGE_SCRYPT: &str = "age:scrypt:v1";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SyncBundleManifest {
     pub schema_version: String,
@@ -84,6 +86,7 @@ pub struct BundleExportOptions {
     pub selected_session_ids: Vec<String>,
     pub max_session_payload_bytes: u64,
     pub allow_unencrypted_sensitive_payloads: bool,
+    pub encryption_passphrase: Option<String>,
 }
 
 pub fn manifest_from_snapshot(snapshot: &DeviceSnapshot) -> SyncBundleManifest {
@@ -107,15 +110,22 @@ pub fn export_bundle(
     options: &BundleExportOptions,
 ) -> std::io::Result<SyncBundle> {
     let sensitive_payload_requested = sensitive_payload_requested(snapshot, options);
-    if sensitive_payload_requested && !options.allow_unencrypted_sensitive_payloads {
+    let encrypted_export =
+        normalized_passphrase(options.encryption_passphrase.as_deref()).is_some();
+    if sensitive_payload_requested
+        && !encrypted_export
+        && !options.allow_unencrypted_sensitive_payloads
+    {
         return Err(std::io::Error::other(
-            "selected memory/MCP or raw session payloads are sensitive and currently exported as unencrypted bundle payloads; pass explicit unencrypted export acknowledgement or deselect them",
+            "selected memory/MCP or raw session payloads are sensitive; provide a bundle passphrase or pass explicit unencrypted export acknowledgement or deselect them",
         ));
     }
     let mut manifest = manifest_from_snapshot(snapshot);
     manifest.encryption = BundleEncryptionInfo {
         required_for_sensitive_payloads: sensitive_payload_requested,
-        method: if sensitive_payload_requested {
+        method: if encrypted_export {
+            BUNDLE_ENCRYPTION_METHOD_AGE_SCRYPT.to_string()
+        } else if sensitive_payload_requested {
             "none:explicit_unencrypted_sensitive_payloads".to_string()
         } else {
             "none:not_required_for_selected_payloads".to_string()
@@ -162,13 +172,46 @@ pub fn export_bundle(
 }
 
 pub fn write_bundle_file(bundle: &SyncBundle, path: impl AsRef<Path>) -> std::io::Result<()> {
+    write_bundle_file_with_passphrase(bundle, path, None)
+}
+
+pub fn write_bundle_file_with_passphrase(
+    bundle: &SyncBundle,
+    path: impl AsRef<Path>,
+    passphrase: Option<&str>,
+) -> std::io::Result<()> {
     let json = serde_json::to_vec_pretty(bundle).map_err(std::io::Error::other)?;
-    fs::write(path, json)
+    let bytes = match normalized_passphrase(passphrase) {
+        Some(passphrase) => encrypt_bundle_bytes(&json, passphrase)?,
+        None => json,
+    };
+    fs::write(path, bytes)
 }
 
 pub fn read_bundle_file(path: impl AsRef<Path>) -> std::io::Result<SyncBundle> {
+    read_bundle_file_with_passphrase(path, None)
+}
+
+pub fn read_bundle_file_with_passphrase(
+    path: impl AsRef<Path>,
+    passphrase: Option<&str>,
+) -> std::io::Result<SyncBundle> {
     let bytes = fs::read(path)?;
-    serde_json::from_slice(&bytes).map_err(std::io::Error::other)
+    match serde_json::from_slice(&bytes) {
+        Ok(bundle) => Ok(bundle),
+        Err(json_error) => {
+            let Some(passphrase) = normalized_passphrase(passphrase) else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "bundle is not readable plaintext JSON and may be encrypted; provide a bundle passphrase ({json_error})"
+                    ),
+                ));
+            };
+            let plaintext = decrypt_bundle_bytes(&bytes, passphrase)?;
+            serde_json::from_slice(&plaintext).map_err(std::io::Error::other)
+        }
+    }
 }
 
 pub fn verify_bundle(bundle: &SyncBundle) -> Vec<String> {
@@ -197,6 +240,27 @@ fn verify_payload(payload: &PayloadEntry, errors: &mut Vec<String>) {
             payload.portable_path, error
         )),
     }
+}
+
+fn normalized_passphrase(passphrase: Option<&str>) -> Option<&str> {
+    passphrase.filter(|value| !value.is_empty())
+}
+
+fn encrypt_bundle_bytes(plaintext: &[u8], passphrase: &str) -> std::io::Result<Vec<u8>> {
+    let secret = age::secrecy::SecretString::from(passphrase.to_owned());
+    let recipient = age::scrypt::Recipient::new(secret);
+    age::encrypt(&recipient, plaintext).map_err(std::io::Error::other)
+}
+
+fn decrypt_bundle_bytes(ciphertext: &[u8], passphrase: &str) -> std::io::Result<Vec<u8>> {
+    let secret = age::secrecy::SecretString::from(passphrase.to_owned());
+    let identity = age::scrypt::Identity::new(secret);
+    age::decrypt(&identity, ciphertext).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("failed to decrypt bundle with provided passphrase: {error}"),
+        )
+    })
 }
 
 fn classify_export_entries(snapshot: &DeviceSnapshot) -> (Vec<SelectionRef>, Vec<RedactionRecord>) {
@@ -452,6 +516,7 @@ mod tests {
                 selected_session_ids: vec![],
                 max_session_payload_bytes: 1024,
                 allow_unencrypted_sensitive_payloads: false,
+                encryption_passphrase: None,
             },
         )
         .unwrap();
@@ -535,6 +600,7 @@ mod tests {
                 selected_session_ids: vec!["codex:session-1".into()],
                 max_session_payload_bytes: 1024,
                 allow_unencrypted_sensitive_payloads: false,
+                encryption_passphrase: None,
             },
         )
         .unwrap();
@@ -552,6 +618,7 @@ mod tests {
                 selected_session_ids: vec!["codex:session-1".into()],
                 max_session_payload_bytes: 1024,
                 allow_unencrypted_sensitive_payloads: false,
+                encryption_passphrase: None,
             },
         );
         assert!(without_sensitive_ack.is_err());
@@ -567,6 +634,7 @@ mod tests {
                 selected_session_ids: vec!["codex:session-1".into()],
                 max_session_payload_bytes: 1024,
                 allow_unencrypted_sensitive_payloads: true,
+                encryption_passphrase: None,
             },
         )
         .unwrap();
@@ -638,6 +706,7 @@ mod tests {
                 selected_session_ids: vec![],
                 max_session_payload_bytes: 1024,
                 allow_unencrypted_sensitive_payloads: false,
+                encryption_passphrase: None,
             },
         )
         .unwrap();
@@ -658,9 +727,57 @@ mod tests {
                 selected_session_ids: vec![],
                 max_session_payload_bytes: 1024,
                 allow_unencrypted_sensitive_payloads: false,
+                encryption_passphrase: None,
             },
         );
         assert!(without_sensitive_ack.is_err());
+
+        let with_encrypted_payload = export_bundle(
+            &snapshot,
+            &BundleExportOptions {
+                home: home.clone(),
+                project: project.clone(),
+                max_payload_bytes: 1024,
+                selected_review_payloads: vec![PayloadSelectionRef {
+                    agent_id: "codex".into(),
+                    portable_path: "~/.codex/memories/guide.md".into(),
+                }],
+                include_session_payloads: false,
+                selected_session_ids: vec![],
+                max_session_payload_bytes: 1024,
+                allow_unencrypted_sensitive_payloads: false,
+                encryption_passphrase: Some("correct horse battery staple".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            with_encrypted_payload.manifest.encryption.method,
+            BUNDLE_ENCRYPTION_METHOD_AGE_SCRYPT
+        );
+        assert_eq!(with_encrypted_payload.payloads.len(), 1);
+        assert!(verify_bundle(&with_encrypted_payload).is_empty());
+
+        let encrypted_bundle_path = root.join("memory.asbundle");
+        write_bundle_file_with_passphrase(
+            &with_encrypted_payload,
+            &encrypted_bundle_path,
+            Some("correct horse battery staple"),
+        )
+        .unwrap();
+        let encrypted_bytes = fs::read(&encrypted_bundle_path).unwrap();
+        assert!(!encrypted_bytes.starts_with(b"{"));
+        assert!(!String::from_utf8_lossy(&encrypted_bytes).contains("useful memory"));
+        assert!(read_bundle_file(&encrypted_bundle_path).is_err());
+        assert!(
+            read_bundle_file_with_passphrase(&encrypted_bundle_path, Some("wrong passphrase"))
+                .is_err()
+        );
+        let decrypted = read_bundle_file_with_passphrase(
+            &encrypted_bundle_path,
+            Some("correct horse battery staple"),
+        )
+        .unwrap();
+        assert_eq!(decrypted, with_encrypted_payload);
 
         let with_payload = export_bundle(
             &snapshot,
@@ -676,6 +793,7 @@ mod tests {
                 selected_session_ids: vec![],
                 max_session_payload_bytes: 1024,
                 allow_unencrypted_sensitive_payloads: true,
+                encryption_passphrase: None,
             },
         )
         .unwrap();

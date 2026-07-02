@@ -60,8 +60,8 @@ Implemented:
 
 - Tauri 2 desktop shell with React/Vite UI.
 - Rust scan/diff/transform/preflight/journal commands with adapter capabilities included in snapshots.
-- Real `.asbundle` JSON container with source snapshot, payload checksums, safe config payloads, explicitly selected memory/MCP review payloads, metadata-only session archive entries, explicitly selected raw session payloads, and secret redactions.
-- Sensitive memory/MCP and raw session payload export is currently unencrypted and therefore requires explicit UI/CLI acknowledgement; real encrypted bundle payloads remain future work rather than being simulated.
+- Real `.asbundle` container with source snapshot, payload checksums, safe config payloads, explicitly selected memory/MCP review payloads, metadata-only session archive entries, explicitly selected raw session payloads, and secret redactions. Plain JSON remains supported for non-sensitive/backward-compatible bundles; passphrase-protected exports are written as age/scrypt ciphertext.
+- Sensitive memory/MCP and raw session payload export uses whole-bundle age passphrase encryption when a passphrase is supplied. Export without a passphrase remains available only behind explicit UI/CLI acknowledgement for trusted transport or local debugging.
 - Local SQLite store for snapshots, apply journals, native session import journals, and session archive records as JSON records.
 - Safe config plus acknowledged memory/MCP review apply path with visual operation selection, backup, operation journal, checksum verification, automatic journal persistence, history loading, and journal rollback.
 - Session Library flow: choose export-capable local sessions for raw payload export; choose remote Codex/Claude session archives, bind them to the target home/project path, import metadata-only records into local Agent Sync Studio SQLite storage, check native import readiness without writing files, discover native DB/index store candidates with schema-only SQLite inspection, preview likely SQLite project-remap columns with no row reads, explicitly select SQLite columns for exact source-project remap with DB backup/transaction/rollback, stage selected raw payloads into an isolated native-import directory, or write selected payloads to native Codex/Claude session-file locations with project-path rewrite evidence, a stopped-agent preflight, native import-journal persistence/history loading, and native-file rollback. Session native actions are gated by adapter capabilities and warn when broad DB/index remap is not supported.
@@ -75,4 +75,4 @@ Implemented in the current product loop:
 Still to deepen:
 - Codex native session import/remap into opaque Codex-owned secondary indexes/databases beyond explicit SQLite exact-match candidate updates; current SQLite remap has backup/transaction/rollback, but adapter-specific index semantics still need fixtures before broad capability claims.
 - Claude Code native session import/remap into opaque Claude-owned secondary indexes/databases beyond explicit SQLite exact-match candidate updates; current SQLite remap has backup/transaction/rollback, but adapter-specific index semantics still need fixtures before broad capability claims.
-- Encrypted bundle payloads for sensitive selected content.
+- Recipient/keychain-based encryption UX beyond the current human passphrase flow.

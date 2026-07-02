@@ -10,7 +10,7 @@ use agent_sync_apply::{
 };
 use agent_sync_bundle::{
     BundleExportOptions, PayloadSelectionRef, export_bundle, manifest_from_snapshot,
-    read_bundle_file, verify_bundle, write_bundle_file,
+    read_bundle_file_with_passphrase, verify_bundle, write_bundle_file_with_passphrase,
 };
 use agent_sync_scan::{ScanOptions, scan_device};
 use agent_sync_transform::create_transform_plan;
@@ -40,6 +40,7 @@ fn main() -> anyhow::Result<()> {
         "export-bundle" => {
             let output =
                 value_after(&args, "--output").unwrap_or_else(|| "agent-sync.asbundle".to_string());
+            let passphrase = bundle_passphrase(&args);
             let options = default_scan_options(&args);
             let snapshot = scan_device(options.clone())?;
             let selected_session_ids = values_after(&args, "--session");
@@ -59,15 +60,17 @@ fn main() -> anyhow::Result<()> {
                     allow_unencrypted_sensitive_payloads: args
                         .iter()
                         .any(|arg| arg == "--allow-unencrypted-sensitive-payloads"),
+                    encryption_passphrase: passphrase.clone(),
                 },
             )?;
-            write_bundle_file(&bundle, &output)?;
+            write_bundle_file_with_passphrase(&bundle, &output, passphrase.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&bundle.manifest)?);
         }
         "verify-bundle" => {
             let input =
                 value_after(&args, "--input").unwrap_or_else(|| "agent-sync.asbundle".to_string());
-            let bundle = read_bundle_file(input)?;
+            let passphrase = bundle_passphrase(&args);
+            let bundle = read_bundle_file_with_passphrase(input, passphrase.as_deref())?;
             let errors = verify_bundle(&bundle);
             println!("{}", serde_json::to_string_pretty(&errors)?);
             if !errors.is_empty() {
@@ -77,7 +80,8 @@ fn main() -> anyhow::Result<()> {
         "check-native-sessions" => {
             let input =
                 value_after(&args, "--input").unwrap_or_else(|| "agent-sync.asbundle".to_string());
-            let bundle = read_bundle_file(input)?;
+            let passphrase = bundle_passphrase(&args);
+            let bundle = read_bundle_file_with_passphrase(input, passphrase.as_deref())?;
             let selected_session_ids = selected_session_ids_or_all(&bundle, &args);
             let target_snapshot = if args.iter().any(|arg| arg == "--no-target-scan") {
                 None
@@ -152,6 +156,7 @@ fn main() -> anyhow::Result<()> {
         "import-native-sessions" => {
             let input =
                 value_after(&args, "--input").unwrap_or_else(|| "agent-sync.asbundle".to_string());
+            let passphrase = bundle_passphrase(&args);
             let target_home = value_after(&args, "--target-home")
                 .map(PathBuf::from)
                 .or_else(|| env::var_os("HOME").map(PathBuf::from))
@@ -161,7 +166,7 @@ fn main() -> anyhow::Result<()> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("agent-sync-backups"));
             let selected_session_ids = values_after(&args, "--session");
-            let bundle = read_bundle_file(input)?;
+            let bundle = read_bundle_file_with_passphrase(input, passphrase.as_deref())?;
             let journal = import_session_payloads_to_native_files(
                 &bundle,
                 &SessionNativeFileImportOptions {
@@ -215,7 +220,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
+                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
             );
             std::process::exit(2);
         }
@@ -280,6 +285,12 @@ fn values_after(args: &[String], flag: &str) -> Vec<String> {
         }
     }
     values
+}
+
+fn bundle_passphrase(args: &[String]) -> Option<String> {
+    value_after(args, "--bundle-passphrase")
+        .or_else(|| env::var("AGENT_SYNC_BUNDLE_PASSPHRASE").ok())
+        .filter(|value| !value.is_empty())
 }
 
 fn selected_session_ids_or_all(
