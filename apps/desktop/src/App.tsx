@@ -115,6 +115,7 @@ type SessionArchiveEntry = {
   session: SessionRecord;
   source_project?: ProjectIdentity;
   payload_included: boolean;
+  payloads: PayloadEntry[];
   import_note: string;
 };
 
@@ -150,6 +151,30 @@ type SessionArchiveImportJournal = {
   }>;
 };
 
+type SessionNativeImportStageJournal = {
+  id: string;
+  status: string;
+  selected: number;
+  staged: number;
+  skipped: number;
+  records: Array<{
+    agent_id: string;
+    agent_name: string;
+    session_id: string;
+    title?: string;
+    source_project?: string;
+    target_project?: string;
+    note: string;
+    written_payloads: Array<{
+      portable_path: string;
+      staged_path: string;
+      source_sha256: string;
+      staged_sha256: string;
+      project_identity_rewritten: boolean;
+    }>;
+  }>;
+};
+
 const safetyOrder = ['safe_config', 'memory_knowledge', 'mcp_config', 'raw_session', 'executable', 'database', 'secret_bearing', 'binary_or_cache', 'unknown'];
 const autoApplyKinds = new Set(['merge_text', 'copy_file']);
 
@@ -165,10 +190,12 @@ export function App() {
   const [preflight, setPreflight] = useState<PreflightReport | null>(null);
   const [journal, setJournal] = useState<OperationJournal | null>(null);
   const [sessionArchiveJournal, setSessionArchiveJournal] = useState<SessionArchiveImportJournal | null>(null);
+  const [sessionStageJournal, setSessionStageJournal] = useState<SessionNativeImportStageJournal | null>(null);
   const [bundleManifest, setBundleManifest] = useState<SyncBundleManifest | null>(null);
   const [verifyErrors, setVerifyErrors] = useState<string[]>([]);
   const [selectedOperationIds, setSelectedOperationIds] = useState<string[]>([]);
   const [selectedSessionIds, setSelectedSessionIds] = useState<string[]>([]);
+  const [selectedLocalSessionIds, setSelectedLocalSessionIds] = useState<string[]>([]);
   const [storeMessage, setStoreMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -177,20 +204,23 @@ export function App() {
   const [targetProjectPath, setTargetProjectPath] = useState('');
   const [backupDir, setBackupDir] = useState('agent-sync-backups');
   const [archiveStorePath, setArchiveStorePath] = useState('agent-sync-studio.sqlite');
+  const [sessionStageDir, setSessionStageDir] = useState('agent-sync-session-staging');
 
   async function scan() {
     setBusy(true);
     setError(null);
     try {
-      const next = await invoke<DeviceSnapshot>('scan_device', { maxDepth: 4, maxEntries: 2000 });
+      const next = await invoke<DeviceSnapshot>('scan_device', { maxDepth: 8, maxEntries: 5000 });
       setSnapshot(next);
       setTargetProjectPath(next.inputs.project);
       setPlan(null);
       setPreflight(null);
       setJournal(null);
       setSessionArchiveJournal(null);
+      setSessionStageJournal(null);
       setBundleManifest(null);
       setStoreMessage(null);
+      setSelectedLocalSessionIds([]);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -220,7 +250,10 @@ export function App() {
       const manifest = await invoke<SyncBundleManifest>('export_bundle_file', {
         snapshot,
         output: exportPath,
-        maxPayloadBytes: 1024 * 1024
+        maxPayloadBytes: 1024 * 1024,
+        includeSessionPayloads: selectedLocalSessionIds.length > 0,
+        selectedSessionIds: selectedLocalSessionIds,
+        maxSessionPayloadBytes: 2 * 1024 * 1024
       });
       setBundleManifest(manifest);
       setBundlePath(exportPath);
@@ -246,6 +279,7 @@ export function App() {
       setPreflight(null);
       setJournal(null);
       setSessionArchiveJournal(null);
+      setSessionStageJournal(null);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -312,6 +346,26 @@ export function App() {
     }
   }
 
+  async function stageSelectedSessionPayloads() {
+    if (!importedBundle) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const nextJournal = await invoke<SessionNativeImportStageJournal>('stage_session_native_import_command', {
+        bundle: importedBundle,
+        selectedSessionIds,
+        targetProject: targetProjectPath || undefined,
+        stagingDir: sessionStageDir || 'agent-sync-session-staging',
+        rewriteProjectIdentity: true
+      });
+      setSessionStageJournal(nextJournal);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function saveSnapshot() {
     if (!snapshot) return;
     setBusy(true);
@@ -358,6 +412,12 @@ export function App() {
     if (path) setBackupDir(path);
   }
 
+  async function chooseSessionStageDir() {
+    const selected = await open({ directory: true, multiple: false });
+    const path = singlePath(selected);
+    if (path) setSessionStageDir(path);
+  }
+
   async function updatePlanState(nextPlan: TransformPlan) {
     const autoIds = nextPlan.operations.filter(isAutoApplicable).map((operation) => operation.id);
     const nextPreflight = await invoke<PreflightReport>('preflight_plan', { plan: { ...nextPlan, operations: nextPlan.operations.filter((operation) => autoIds.includes(operation.id)) } });
@@ -375,12 +435,20 @@ export function App() {
     setSelectedSessionIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
   }
 
+  function toggleLocalSession(id: string) {
+    setSelectedLocalSessionIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  }
+
   const agents = snapshot?.agents ?? [];
   const detected = agents.filter((agent) => agent.detected);
   const totalSessions = useMemo(() => agents.reduce((count, agent) => count + agent.sessions.length, 0), [agents]);
+  const localSessions = useMemo(() => agents.flatMap((agent) => agent.sessions.map((session) => ({ agent, session }))), [agents]);
   const selectedOperations = useMemo(() => (plan ? plan.operations.filter((operation) => selectedOperationIds.includes(operation.id)) : []), [plan, selectedOperationIds]);
   const autoApplicableCount = plan?.operations.filter(isAutoApplicable).length ?? 0;
   const importedSessionArchives = importedBundle?.session_archives ?? [];
+  const selectedRemotePayloadCount = importedSessionArchives
+    .filter((archive) => selectedSessionIds.includes(archive.session.id))
+    .reduce((count, archive) => count + archive.payloads.length, 0);
 
   return (
     <main className="shell">
@@ -458,6 +526,11 @@ export function App() {
                 Archive store
                 <input value={archiveStorePath} onChange={(event) => setArchiveStorePath(event.target.value)} placeholder="agent-sync-studio.sqlite" />
               </label>
+              <label>
+                Session staging directory
+                <input value={sessionStageDir} onChange={(event) => setSessionStageDir(event.target.value)} placeholder="agent-sync-session-staging" />
+              </label>
+              <button className="secondary" onClick={chooseSessionStageDir} disabled={busy}>Choose staging dir…</button>
             </div>
             {snapshot && (
               <div className="chips spaced">
@@ -493,8 +566,36 @@ export function App() {
 
         <section className="panel">
           <div className="panelTitle">
+            <h2>Local sessions for next bundle</h2>
+            <span>{selectedLocalSessionIds.length}/{localSessions.length} selected for raw payload export</span>
+          </div>
+          {localSessions.length ? (
+            <div className="stack">
+              <div className="chips">
+                <button className="secondary smallButton" onClick={() => setSelectedLocalSessionIds(localSessions.map(({ session }) => session.id))} disabled={busy}>Select all local sessions</button>
+                <button className="secondary smallButton" onClick={() => setSelectedLocalSessionIds([])} disabled={busy}>Clear</button>
+              </div>
+              <div className="operationTable compact">
+                {localSessions.slice(0, 120).map(({ agent, session }) => (
+                  <label key={session.id} className="operationItem">
+                    <input type="checkbox" checked={selectedLocalSessionIds.includes(session.id)} onChange={() => toggleLocalSession(session.id)} />
+                    <span>
+                      <strong>{agent.name}</strong> · {session.title ?? session.id}
+                      <small>{session.visibility} · {session.content_policy} · payload is included only if checked before Export local bundle</small>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <p className="empty">Scan with session depth to discover local Codex/Claude session files. Raw payload export is opt-in per session.</p>
+          )}
+        </section>
+
+        <section className="panel">
+          <div className="panelTitle">
             <h2>Session Library</h2>
-            <span>{selectedSessionIds.length}/{importedSessionArchives.length} selected</span>
+            <span>{selectedSessionIds.length}/{importedSessionArchives.length} selected · {selectedRemotePayloadCount} payloads</span>
           </div>
           {importedSessionArchives.length ? (
             <div className="stack">
@@ -505,7 +606,7 @@ export function App() {
                     <span>
                       <strong>{archive.agent_name}</strong> · {archive.session.title ?? archive.session.id}
                       <small>
-                        {archive.session.visibility} · {archive.session.content_policy} · source project {archive.source_project?.canonical_path ?? 'unknown'} · {archive.payload_included ? 'payload included' : 'metadata-only'}
+                        {archive.session.visibility} · {archive.session.content_policy} · source project {archive.source_project?.canonical_path ?? 'unknown'} · {archive.payload_included ? `${archive.payloads.length} payload(s) included` : 'metadata-only'}
                       </small>
                       <small>{archive.import_note}</small>
                     </span>
@@ -514,6 +615,9 @@ export function App() {
               </div>
               <button onClick={importSelectedSessionArchives} disabled={!importedBundle || selectedSessionIds.length === 0 || busy}>
                 Import selected session archives
+              </button>
+              <button className="secondary" onClick={stageSelectedSessionPayloads} disabled={!importedBundle || selectedSessionIds.length === 0 || busy}>
+                Stage selected native session payloads
               </button>
             </div>
           ) : (
@@ -629,6 +733,31 @@ export function App() {
             <ul className="operationList">
               {sessionArchiveJournal.records.map((record) => (
                 <li key={record.record_id}>{record.agent_name} · {record.title ?? record.session_id} · target {record.target_project ?? 'none'} · {record.note}</li>
+              ))}
+            </ul>
+          </section>
+        )}
+        {sessionStageJournal && (
+          <section className="panel">
+            <div className="panelTitle">
+              <h2>Native import staging journal</h2>
+              <span>{sessionStageJournal.id} · {sessionStageJournal.status}</span>
+            </div>
+            <div className="chips">
+              <span className="chip safe_config">staged {sessionStageJournal.staged}</span>
+              <span className="chip">selected {sessionStageJournal.selected}</span>
+              <span className="chip">skipped {sessionStageJournal.skipped}</span>
+            </div>
+            <ul className="operationList">
+              {sessionStageJournal.records.map((record) => (
+                <li key={record.session_id}>
+                  {record.agent_name} · {record.title ?? record.session_id} · payloads {record.written_payloads.length} · target {record.target_project ?? 'none'} · {record.note}
+                  <ul>
+                    {record.written_payloads.map((payload) => (
+                      <li key={payload.staged_path}>{payload.project_identity_rewritten ? 'rewritten' : 'copied'} · {payload.portable_path} → {payload.staged_path}</li>
+                    ))}
+                  </ul>
+                </li>
               ))}
             </ul>
           </section>

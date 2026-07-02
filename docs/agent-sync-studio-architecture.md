@@ -56,10 +56,10 @@ Implemented:
 
 - Tauri 2 desktop shell with React/Vite UI.
 - Rust scan/diff/transform/preflight/journal commands.
-- Real `.asbundle` JSON container with source snapshot, payload checksums, metadata-only session archive entries, and secret redactions.
+- Real `.asbundle` JSON container with source snapshot, payload checksums, metadata-only session archive entries, explicitly selected raw session payloads, and secret redactions.
 - Local SQLite store for snapshots/plans/journals as JSON records.
 - Safe config apply path with visual operation selection, backup, operation journal, and checksum verification.
-- Session Library flow: choose remote Codex/Claude session archives, bind them to the target project path, and import metadata-only records into local Agent Sync Studio SQLite storage.
+- Session Library flow: choose local sessions for raw payload export; choose remote Codex/Claude session archives, bind them to the target project path, import metadata-only records into local Agent Sync Studio SQLite storage, or stage selected raw payloads into an isolated native-import directory with project-path rewrite evidence.
 - Rust CLI: `scan`, `bundle-manifest`, `export-bundle`, `verify-bundle`, `self-plan`.
 
 Implemented in the current product loop:
@@ -68,6 +68,6 @@ Implemented in the current product loop:
 - Project-mapping UI with git-remote exact match, basename fallback, confidence, and manual-review warning.
 
 Still to deepen:
-- Codex native session import/remap beyond Agent Sync Studio archive storage; raw session identity rewrite remains review-only until adapter-specific import is implemented.
-- Claude Code native session import/remap beyond Agent Sync Studio archive storage; raw session identity rewrite remains review-only until adapter-specific import is implemented.
+- Codex native session import/remap from staging into Codex-owned indexes/databases; direct native writes remain adapter-specific future work.
+- Claude Code native session import/remap from staging into Claude-owned indexes/databases; direct native writes remain adapter-specific future work.
 - Encrypted bundle payloads for sensitive selected content.

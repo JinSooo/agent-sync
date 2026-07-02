@@ -42,6 +42,8 @@ pub struct SessionArchiveEntry {
     pub session: SessionRecord,
     pub source_project: Option<ProjectIdentity>,
     pub payload_included: bool,
+    #[serde(default)]
+    pub payloads: Vec<PayloadEntry>,
     pub import_note: String,
 }
 
@@ -71,6 +73,9 @@ pub struct BundleExportOptions {
     pub home: PathBuf,
     pub project: PathBuf,
     pub max_payload_bytes: u64,
+    pub include_session_payloads: bool,
+    pub selected_session_ids: Vec<String>,
+    pub max_session_payload_bytes: u64,
 }
 
 pub fn manifest_from_snapshot(snapshot: &DeviceSnapshot) -> SyncBundleManifest {
@@ -125,7 +130,7 @@ pub fn export_bundle(
         manifest,
         source_snapshot: snapshot.clone(),
         payloads,
-        session_archives: session_archives_from_snapshot(snapshot),
+        session_archives: session_archives_from_snapshot(snapshot, options)?,
     })
 }
 
@@ -142,20 +147,29 @@ pub fn read_bundle_file(path: impl AsRef<Path>) -> std::io::Result<SyncBundle> {
 pub fn verify_bundle(bundle: &SyncBundle) -> Vec<String> {
     let mut errors = Vec::new();
     for payload in &bundle.payloads {
-        match base64::engine::general_purpose::STANDARD.decode(&payload.base64_content) {
-            Ok(bytes) => {
-                let sha256 = format!("{:x}", Sha256::digest(&bytes));
-                if sha256 != payload.sha256 {
-                    errors.push(format!("checksum mismatch for {}", payload.portable_path));
-                }
-            }
-            Err(error) => errors.push(format!(
-                "invalid base64 for {}: {}",
-                payload.portable_path, error
-            )),
+        verify_payload(payload, &mut errors);
+    }
+    for archive in &bundle.session_archives {
+        for payload in &archive.payloads {
+            verify_payload(payload, &mut errors);
         }
     }
     errors
+}
+
+fn verify_payload(payload: &PayloadEntry, errors: &mut Vec<String>) {
+    match base64::engine::general_purpose::STANDARD.decode(&payload.base64_content) {
+        Ok(bytes) => {
+            let sha256 = format!("{:x}", Sha256::digest(&bytes));
+            if sha256 != payload.sha256 {
+                errors.push(format!("checksum mismatch for {}", payload.portable_path));
+            }
+        }
+        Err(error) => errors.push(format!(
+            "invalid base64 for {}: {}",
+            payload.portable_path, error
+        )),
+    }
 }
 
 fn classify_export_entries(snapshot: &DeviceSnapshot) -> (Vec<SelectionRef>, Vec<RedactionRecord>) {
@@ -182,7 +196,11 @@ fn classify_export_entries(snapshot: &DeviceSnapshot) -> (Vec<SelectionRef>, Vec
     (selections, redactions)
 }
 
-fn session_archives_from_snapshot(snapshot: &DeviceSnapshot) -> Vec<SessionArchiveEntry> {
+fn session_archives_from_snapshot(
+    snapshot: &DeviceSnapshot,
+    options: &BundleExportOptions,
+) -> std::io::Result<Vec<SessionArchiveEntry>> {
+    let include_all = options.include_session_payloads && options.selected_session_ids.is_empty();
     snapshot
         .agents
         .iter()
@@ -191,6 +209,18 @@ fn session_archives_from_snapshot(snapshot: &DeviceSnapshot) -> Vec<SessionArchi
                 .sessions
                 .iter()
                 .map(move |session| {
+                    let selected = include_all
+                        || options
+                            .selected_session_ids
+                            .iter()
+                            .any(|id| id == &session.id);
+                    let payloads = if options.include_session_payloads && selected {
+                        session_payloads(agent.id.as_str(), session, options)?
+                    } else {
+                        Vec::new()
+                    };
+                    let payload_included = !payloads.is_empty();
+                    Ok::<_, std::io::Error>(
                     SessionArchiveEntry {
                 agent_id: agent.id.clone(),
                 agent_name: agent.name.clone(),
@@ -202,14 +232,53 @@ fn session_archives_from_snapshot(snapshot: &DeviceSnapshot) -> Vec<SessionArchi
                     .or_else(|| {
                         (snapshot.projects.len() == 1).then(|| snapshot.projects[0].clone())
                     }),
-                payload_included: false,
-                import_note:
+                payload_included,
+                payloads,
+                import_note: if payload_included {
+                    "explicitly selected raw session payload included for staging import"
+                        .to_string()
+                } else {
                     "metadata-only archive; raw transcript/native-session payload is not included"
-                        .to_string(),
-            }
+                        .to_string()
+                },
+            })
                 })
         })
         .collect()
+}
+
+fn session_payloads(
+    agent_id: &str,
+    session: &SessionRecord,
+    options: &BundleExportOptions,
+) -> std::io::Result<Vec<PayloadEntry>> {
+    let mut payloads = Vec::new();
+    for storage_ref in &session.storage_refs {
+        let Some(path) = physical_path(&storage_ref.portable_path, &options.home, &options.project)
+        else {
+            continue;
+        };
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata)
+                if metadata.is_file() && metadata.len() <= options.max_session_payload_bytes =>
+            {
+                metadata
+            }
+            _ => continue,
+        };
+        if metadata.len() > options.max_session_payload_bytes {
+            continue;
+        }
+        let bytes = fs::read(&path)?;
+        let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        payloads.push(PayloadEntry {
+            agent_id: agent_id.to_string(),
+            portable_path: storage_ref.portable_path.clone(),
+            sha256,
+            base64_content: base64::engine::general_purpose::STANDARD.encode(bytes),
+        });
+    }
+    Ok(payloads)
 }
 
 fn physical_path(portable: &str, home: &Path, project: &Path) -> Option<PathBuf> {
@@ -323,6 +392,9 @@ mod tests {
                 home: root.join("home"),
                 project: project.clone(),
                 max_payload_bytes: 1024,
+                include_session_payloads: false,
+                selected_session_ids: vec![],
+                max_session_payload_bytes: 1024,
             },
         )
         .unwrap();
@@ -332,6 +404,98 @@ mod tests {
         assert!(!bundle.session_archives[0].payload_included);
         assert_eq!(bundle.manifest.redactions.len(), 1);
         assert!(verify_bundle(&bundle).is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn includes_selected_session_payloads_only_when_requested() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-sync-session-payload-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let home = root.join("home");
+        let project = root.join("project");
+        let session_path = home.join(".codex").join("sessions").join("s1.jsonl");
+        fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(&session_path, "{\"cwd\":\"/tmp/project\"}\n").unwrap();
+        let session = SessionRecord {
+            id: "codex:session-1".into(),
+            agent_id: "codex".into(),
+            title: Some("Session 1".into()),
+            created_at: None,
+            updated_at: None,
+            source_project: None,
+            storage_refs: vec![agent_sync_core::StorageRef {
+                kind: "raw_session_surface".into(),
+                portable_path: "~/.codex/sessions/s1.jsonl".into(),
+                physical_path: None,
+            }],
+            visibility: SessionVisibility::Unknown,
+            content_policy: ContentPolicy::ExplicitRawPayloadRequired,
+            import_capabilities: SessionImportCapabilities {
+                import_as_archive: true,
+                import_as_new_session: false,
+                identity_rewrite: false,
+                requires_app_stopped: true,
+            },
+        };
+        let snapshot = DeviceSnapshot {
+            schema_version: "0.2".into(),
+            id: Uuid::new_v4(),
+            generated_at: Utc::now(),
+            platform: PlatformInfo {
+                os: "test".into(),
+                arch: "test".into(),
+            },
+            inputs: SnapshotInputs {
+                home: "~".into(),
+                project: project.display().to_string(),
+                max_depth: 8,
+                max_entries: 10,
+            },
+            summary: SnapshotSummary::default(),
+            projects: vec![],
+            agents: vec![AgentSnapshot {
+                id: "codex".into(),
+                name: "Codex".into(),
+                detected: true,
+                roots: vec![],
+                findings: vec![],
+                sessions: vec![session],
+            }],
+        };
+
+        let metadata_only = export_bundle(
+            &snapshot,
+            &BundleExportOptions {
+                home: home.clone(),
+                project: project.clone(),
+                max_payload_bytes: 1024,
+                include_session_payloads: false,
+                selected_session_ids: vec!["codex:session-1".into()],
+                max_session_payload_bytes: 1024,
+            },
+        )
+        .unwrap();
+        assert!(!metadata_only.session_archives[0].payload_included);
+        assert!(metadata_only.session_archives[0].payloads.is_empty());
+
+        let with_payload = export_bundle(
+            &snapshot,
+            &BundleExportOptions {
+                home,
+                project,
+                max_payload_bytes: 1024,
+                include_session_payloads: true,
+                selected_session_ids: vec!["codex:session-1".into()],
+                max_session_payload_bytes: 1024,
+            },
+        )
+        .unwrap();
+        assert!(with_payload.session_archives[0].payload_included);
+        assert_eq!(with_payload.session_archives[0].payloads.len(), 1);
+        assert!(verify_bundle(&with_payload).is_empty());
         let _ = fs::remove_dir_all(root);
     }
 }

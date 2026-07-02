@@ -76,3 +76,6 @@ input:focus { border-color: rgba(110,231,255,.55); box-shadow: 0 0 0 3px rgba(11
   .hero { display: grid; }
   .actions { flex-wrap: wrap; }
 }
+.smallButton { padding: 8px 10px; font-size: 12px; }
+.operationTable.compact { max-height: 300px; }
+.operationList ul { margin: 8px 0 12px; padding-left: 18px; color: #8ea0b8; }

@@ -33,12 +33,19 @@ fn main() -> anyhow::Result<()> {
                 value_after(&args, "--output").unwrap_or_else(|| "agent-sync.asbundle".to_string());
             let options = default_scan_options(&args);
             let snapshot = scan_device(options.clone())?;
+            let selected_session_ids = values_after(&args, "--session");
+            let include_session_payloads = args.iter().any(|arg| {
+                arg == "--include-session-payloads" || arg == "--include-all-session-payloads"
+            });
             let bundle = export_bundle(
                 &snapshot,
                 &BundleExportOptions {
                     home: options.home,
                     project: options.project,
                     max_payload_bytes: 1024 * 1024,
+                    include_session_payloads,
+                    selected_session_ids,
+                    max_session_payload_bytes: 2 * 1024 * 1024,
                 },
             )?;
             write_bundle_file(&bundle, &output)?;
@@ -66,7 +73,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|self-plan] [--home PATH] [--project PATH] [--output PATH] [--input PATH]"
+                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|self-plan] [--home PATH] [--project PATH] [--output PATH] [--input PATH] [--include-session-payloads --session SESSION_ID]"
             );
             std::process::exit(2);
         }
@@ -100,4 +107,18 @@ fn value_after(args: &[String], flag: &str) -> Option<String> {
     args.windows(2)
         .find(|window| window[0] == flag)
         .map(|window| window[1].clone())
+}
+
+fn values_after(args: &[String], flag: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut i = 0;
+    while i + 1 < args.len() {
+        if args[i] == flag {
+            values.push(args[i + 1].clone());
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    values
 }

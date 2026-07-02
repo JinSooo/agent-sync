@@ -23,12 +23,14 @@ The older Node CLI remains available as a legacy reference while the Rust/Tauri 
 ## What works now
 
 - Scan local Codex and Claude Code surfaces without printing file contents.
-- Export a verified `.asbundle` containing the source snapshot, safe text payloads, and metadata-only session archive entries.
+- Export a verified `.asbundle` containing the source snapshot, safe text payloads, metadata-only session archive entries, and explicitly selected raw session payloads.
 - Import and verify a remote `.asbundle` in the desktop UI.
 - Create a remote-to-local transform plan.
 - Show project mapping confidence by normalized git remote, directory basename, or manual fallback.
 - Select auto-safe operations visually.
+- Choose local Codex/Claude sessions whose raw payloads should be included in the next bundle.
 - Choose remote Codex/Claude session archives and import them into the local Agent Sync Studio archive store with target-project mapping.
+- Stage selected raw session payloads into an isolated native-import directory with optional source-project to target-project path rewriting.
 - Apply selected safe payloads with backups and checksum verification.
 - Persist snapshots in a local SQLite record store.
 
@@ -40,6 +42,7 @@ cargo test --workspace
 cargo run -p agent_sync_cli -- scan
 cargo run -p agent_sync_cli -- bundle-manifest
 cargo run -p agent_sync_cli -- export-bundle --output agent-sync-local.asbundle
+cargo run -p agent_sync_cli -- export-bundle --output agent-sync-sessions.asbundle --include-session-payloads --session "codex:session-id"
 cargo run -p agent_sync_cli -- verify-bundle --input agent-sync-local.asbundle
 cargo run -p agent_sync_cli -- self-plan
 
@@ -72,6 +75,7 @@ Review-required by default:
 Automatically applicable today:
 
 - safe text config payloads from a verified bundle, only through selected operations, with backup and checksum verification.
-- metadata-only session archive records into Agent Sync Studio SQLite storage. This does not rewrite native Codex/Claude session databases.
+- metadata-only session archive records into Agent Sync Studio SQLite storage.
+- selected raw session payloads into an isolated staging directory with project-path rewrite journal. This does not rewrite native Codex/Claude session databases.
 
 See `.omx/plans/agent-sync-studio-full-architecture-20260701.md` and `docs/agent-sync-studio-architecture.md` for the full implementation architecture.

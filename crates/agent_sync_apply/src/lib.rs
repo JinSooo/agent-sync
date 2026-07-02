@@ -110,6 +110,48 @@ pub struct SessionArchiveImportRecord {
     pub note: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionNativeImportStageOptions {
+    pub selected_session_ids: Vec<String>,
+    pub target_project: Option<String>,
+    pub staging_dir: PathBuf,
+    pub rewrite_project_identity: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionNativeImportStageJournal {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub bundle_id: Uuid,
+    pub source_snapshot: Uuid,
+    pub selected: usize,
+    pub staged: usize,
+    pub skipped: usize,
+    pub records: Vec<SessionNativeImportStageRecord>,
+    pub status: JournalStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionNativeImportStageRecord {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub session_id: String,
+    pub title: Option<String>,
+    pub source_project: Option<String>,
+    pub target_project: Option<String>,
+    pub written_payloads: Vec<StagedPayloadRecord>,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StagedPayloadRecord {
+    pub portable_path: String,
+    pub staged_path: String,
+    pub source_sha256: String,
+    pub staged_sha256: String,
+    pub project_identity_rewritten: bool,
+}
+
 pub fn create_journal(plan: &TransformPlan) -> OperationJournal {
     OperationJournal {
         id: Uuid::new_v4(),
@@ -182,6 +224,138 @@ pub fn import_session_archives(
         records,
         status: JournalStatus::Completed,
     })
+}
+
+pub fn stage_session_native_import(
+    bundle: &SyncBundle,
+    options: &SessionNativeImportStageOptions,
+) -> std::io::Result<SessionNativeImportStageJournal> {
+    fs::create_dir_all(&options.staging_dir)?;
+    let mut records = Vec::new();
+    let selected = options.selected_session_ids.len();
+
+    for archive in &bundle.session_archives {
+        if !options
+            .selected_session_ids
+            .iter()
+            .any(|id| id == &archive.session.id)
+        {
+            continue;
+        }
+        if archive.payloads.is_empty() {
+            continue;
+        }
+
+        let session_dir = options
+            .staging_dir
+            .join(&archive.agent_id)
+            .join(sanitize_path(&archive.session.id));
+        fs::create_dir_all(&session_dir)?;
+
+        let mut written_payloads = Vec::new();
+        for payload in &archive.payloads {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&payload.base64_content)
+                .map_err(std::io::Error::other)?;
+            let source_sha = format!("{:x}", Sha256::digest(&bytes));
+            if source_sha != payload.sha256 {
+                return Err(std::io::Error::other(format!(
+                    "payload checksum mismatch for {}",
+                    payload.portable_path
+                )));
+            }
+            let (next_bytes, rewritten) = rewrite_session_project_identity(
+                bytes,
+                archive
+                    .source_project
+                    .as_ref()
+                    .map(|project| project.canonical_path.as_str()),
+                archive
+                    .source_project
+                    .as_ref()
+                    .and_then(|project| project.physical_path.as_deref()),
+                options.target_project.as_deref(),
+                options.rewrite_project_identity,
+            );
+            let staged_sha = format!("{:x}", Sha256::digest(&next_bytes));
+            let staged_path = session_dir.join(sanitize_path(&payload.portable_path));
+            fs::write(&staged_path, next_bytes)?;
+            written_payloads.push(StagedPayloadRecord {
+                portable_path: payload.portable_path.clone(),
+                staged_path: staged_path.display().to_string(),
+                source_sha256: payload.sha256.clone(),
+                staged_sha256: staged_sha,
+                project_identity_rewritten: rewritten,
+            });
+        }
+
+        records.push(SessionNativeImportStageRecord {
+            agent_id: archive.agent_id.clone(),
+            agent_name: archive.agent_name.clone(),
+            session_id: archive.session.id.clone(),
+            title: archive.session.title.clone(),
+            source_project: archive
+                .source_project
+                .as_ref()
+                .map(|project| project.canonical_path.clone()),
+            target_project: options.target_project.clone(),
+            written_payloads,
+            note: "staged only; native Codex/Claude index/database write is not performed"
+                .to_string(),
+        });
+    }
+
+    let staged = records.len();
+    Ok(SessionNativeImportStageJournal {
+        id: Uuid::new_v4(),
+        created_at: Utc::now(),
+        bundle_id: bundle.manifest.id,
+        source_snapshot: bundle.source_snapshot.id,
+        selected,
+        staged,
+        skipped: selected.saturating_sub(staged),
+        records,
+        status: JournalStatus::Completed,
+    })
+}
+
+fn rewrite_session_project_identity(
+    bytes: Vec<u8>,
+    source_canonical_path: Option<&str>,
+    source_physical_path: Option<&str>,
+    target_project: Option<&str>,
+    enabled: bool,
+) -> (Vec<u8>, bool) {
+    if !enabled {
+        return (bytes, false);
+    }
+    let Some(target_project) = target_project.filter(|value| !value.is_empty()) else {
+        return (bytes, false);
+    };
+    let Ok(mut text) = String::from_utf8(bytes.clone()) else {
+        return (bytes, false);
+    };
+    let mut rewritten = false;
+    for candidate in [source_canonical_path, source_physical_path]
+        .into_iter()
+        .flatten()
+        .filter(|value| !value.is_empty() && *value != target_project)
+    {
+        if text.contains(candidate) {
+            text = text.replace(candidate, target_project);
+            rewritten = true;
+        }
+        let escaped_candidate = candidate.replace('\\', "\\\\");
+        if text.contains(&escaped_candidate) {
+            text = text.replace(&escaped_candidate, &target_project.replace('\\', "\\\\"));
+            rewritten = true;
+        }
+    }
+    if rewritten {
+        (text.into_bytes(), true)
+    } else {
+        (bytes, false)
+    }
 }
 
 pub fn preflight(plan: &TransformPlan) -> PreflightReport {
@@ -511,6 +685,7 @@ mod tests {
                 session,
                 source_project: None,
                 payload_included: false,
+                payloads: vec![],
                 import_note: "metadata-only".into(),
             }],
         };
@@ -533,5 +708,101 @@ mod tests {
             Some("/target/project")
         );
         assert_eq!(store.list("session_archive").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn stages_session_payloads_with_project_rewrite() {
+        let root = std::env::temp_dir().join(format!("agent-sync-stage-{}", Uuid::new_v4()));
+        let staging = root.join("staging");
+        let source_project = "/Users/me/source-project";
+        let target_project = "C:/Users/me/target-project";
+        let bytes = format!("{{\"cwd\":\"{}\",\"text\":\"hello\"}}\n", source_project).into_bytes();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let session = agent_sync_core::SessionRecord {
+            id: "codex:session-1".into(),
+            agent_id: "codex".into(),
+            title: Some("Session 1".into()),
+            created_at: None,
+            updated_at: None,
+            source_project: None,
+            storage_refs: vec![],
+            visibility: agent_sync_core::SessionVisibility::Unknown,
+            content_policy: agent_sync_core::ContentPolicy::ExplicitRawPayloadRequired,
+            import_capabilities: agent_sync_core::SessionImportCapabilities::default(),
+        };
+        let bundle = SyncBundle {
+            manifest: agent_sync_bundle::SyncBundleManifest {
+                schema_version: "0.2".into(),
+                id: Uuid::new_v4(),
+                created_at: Utc::now(),
+                source_snapshot: Uuid::new_v4(),
+                selections: vec![],
+                redactions: vec![],
+                encryption: agent_sync_bundle::BundleEncryptionInfo {
+                    required_for_sensitive_payloads: true,
+                    method: "none".into(),
+                },
+            },
+            source_snapshot: agent_sync_core::DeviceSnapshot {
+                schema_version: "0.2".into(),
+                id: Uuid::new_v4(),
+                generated_at: Utc::now(),
+                platform: agent_sync_core::PlatformInfo {
+                    os: "test".into(),
+                    arch: "test".into(),
+                },
+                inputs: agent_sync_core::SnapshotInputs {
+                    home: "~".into(),
+                    project: source_project.into(),
+                    max_depth: 1,
+                    max_entries: 10,
+                },
+                summary: agent_sync_core::SnapshotSummary::default(),
+                projects: vec![],
+                agents: vec![],
+            },
+            payloads: vec![],
+            session_archives: vec![agent_sync_bundle::SessionArchiveEntry {
+                agent_id: "codex".into(),
+                agent_name: "Codex".into(),
+                session,
+                source_project: Some(agent_sync_core::ProjectIdentity {
+                    id: Uuid::new_v4(),
+                    canonical_path: source_project.into(),
+                    physical_path: Some(source_project.into()),
+                    git_remote: None,
+                    git_root_fingerprint: None,
+                    package_name: None,
+                    agent_project_keys: vec![],
+                }),
+                payload_included: true,
+                payloads: vec![PayloadEntry {
+                    agent_id: "codex".into(),
+                    portable_path: "~/.codex/sessions/2026/07/02/rollout.jsonl".into(),
+                    sha256: sha,
+                    base64_content: base64::engine::general_purpose::STANDARD.encode(bytes),
+                }],
+                import_note: "raw payload included".into(),
+            }],
+        };
+
+        let journal = stage_session_native_import(
+            &bundle,
+            &SessionNativeImportStageOptions {
+                selected_session_ids: vec!["codex:session-1".into()],
+                target_project: Some(target_project.into()),
+                staging_dir: staging.clone(),
+                rewrite_project_identity: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(journal.staged, 1);
+        assert!(journal.records[0].written_payloads[0].project_identity_rewritten);
+        let staged_text =
+            fs::read_to_string(&journal.records[0].written_payloads[0].staged_path).unwrap();
+        assert!(staged_text.contains(target_project));
+        assert!(!staged_text.contains(source_project));
+        let _ = fs::remove_dir_all(root);
     }
 }

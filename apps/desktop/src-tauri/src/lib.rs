@@ -1,7 +1,8 @@
 use agent_sync_apply::{
     ApplyContext, OperationJournal, PreflightReport, SessionArchiveImportJournal,
-    SessionArchiveImportOptions, apply_safe_payloads, create_journal, import_session_archives,
-    preflight,
+    SessionArchiveImportOptions, SessionNativeImportStageJournal, SessionNativeImportStageOptions,
+    apply_safe_payloads, create_journal, import_session_archives, preflight,
+    stage_session_native_import,
 };
 use agent_sync_bundle::{
     BundleExportOptions, SyncBundle, SyncBundleManifest, export_bundle, manifest_from_snapshot,
@@ -67,6 +68,9 @@ fn export_bundle_file(
     project: Option<String>,
     output: String,
     max_payload_bytes: Option<u64>,
+    include_session_payloads: Option<bool>,
+    selected_session_ids: Option<Vec<String>>,
+    max_session_payload_bytes: Option<u64>,
 ) -> Result<SyncBundleManifest, String> {
     let home = home
         .map(PathBuf::from)
@@ -82,6 +86,9 @@ fn export_bundle_file(
             home,
             project,
             max_payload_bytes: max_payload_bytes.unwrap_or(1024 * 1024),
+            include_session_payloads: include_session_payloads.unwrap_or(false),
+            selected_session_ids: selected_session_ids.unwrap_or_default(),
+            max_session_payload_bytes: max_session_payload_bytes.unwrap_or(2 * 1024 * 1024),
         },
     )
     .map_err(|error| error.to_string())?;
@@ -158,6 +165,26 @@ fn import_session_archives_command(
 }
 
 #[tauri::command]
+fn stage_session_native_import_command(
+    bundle: SyncBundle,
+    selected_session_ids: Vec<String>,
+    target_project: Option<String>,
+    staging_dir: String,
+    rewrite_project_identity: Option<bool>,
+) -> Result<SessionNativeImportStageJournal, String> {
+    stage_session_native_import(
+        &bundle,
+        &SessionNativeImportStageOptions {
+            selected_session_ids,
+            target_project,
+            staging_dir: PathBuf::from(staging_dir),
+            rewrite_project_identity: rewrite_project_identity.unwrap_or(true),
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn save_snapshot_to_store(db_path: String, snapshot: DeviceSnapshot) -> Result<String, String> {
     let store = AgentSyncStore::open(db_path).map_err(|error| error.to_string())?;
     store
@@ -186,6 +213,7 @@ pub fn run() {
             create_operation_journal,
             apply_safe_payloads_command,
             import_session_archives_command,
+            stage_session_native_import_command,
             save_snapshot_to_store,
             list_store_records
         ])
