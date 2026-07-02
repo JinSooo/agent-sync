@@ -146,6 +146,32 @@ type BundleRecipientProfile = {
   revoked: boolean;
 };
 
+type BundleRecipientRotationRecord = {
+  profile_id: string;
+  label: string;
+  device_hint?: string;
+  platform_hint?: string;
+  age_recipient: string;
+  created_at: string;
+  updated_at: string;
+  revoked: boolean;
+  age_days: number;
+  stale: boolean;
+  warnings: string[];
+  recommended_actions: string[];
+};
+
+type BundleRecipientRotationPlan = {
+  schema_version: string;
+  generated_at: string;
+  stale_after_days: number;
+  active_count: number;
+  stale_count: number;
+  revoked_count: number;
+  warnings: string[];
+  records: BundleRecipientRotationRecord[];
+};
+
 type PayloadEntry = {
   agent_id: string;
   portable_path: string;
@@ -438,6 +464,7 @@ export function App() {
   const [bundleKeychainBackupPassphrase, setBundleKeychainBackupPassphrase] = useState('');
   const [bundleRecipientInputs, setBundleRecipientInputs] = useState('');
   const [recipientProfiles, setRecipientProfiles] = useState<BundleRecipientProfile[]>([]);
+  const [recipientRotationPlan, setRecipientRotationPlan] = useState<BundleRecipientRotationPlan | null>(null);
   const [selectedRecipientProfileIds, setSelectedRecipientProfileIds] = useState<string[]>([]);
   const [recipientProfileLabel, setRecipientProfileLabel] = useState('');
   const [recipientProfileDeviceHint, setRecipientProfileDeviceHint] = useState('');
@@ -1167,10 +1194,16 @@ export function App() {
 
   async function refreshRecipientProfiles() {
     try {
+      const dbPath = archiveStorePath || 'agent-sync-studio.sqlite';
       const profiles = await invoke<BundleRecipientProfile[]>('list_bundle_recipient_profiles', {
-        dbPath: archiveStorePath || 'agent-sync-studio.sqlite'
+        dbPath
+      });
+      const rotationPlan = await invoke<BundleRecipientRotationPlan>('bundle_recipient_rotation_plan_command', {
+        dbPath,
+        staleAfterDays: 90
       });
       setRecipientProfiles(profiles);
+      setRecipientRotationPlan(rotationPlan);
       setSelectedRecipientProfileIds((current) => current.filter((id) => profiles.some((profile) => profile.id === id && !profile.revoked)));
     } catch (err) {
       setError(`Failed to load trusted recipients: ${String(err)}`);
@@ -1326,6 +1359,9 @@ export function App() {
     () => recipientProfiles.filter((profile) => !profile.revoked && selectedRecipientProfileIds.includes(profile.id)),
     [recipientProfiles, selectedRecipientProfileIds]
   );
+  const recipientRotationRecordByProfileId = useMemo(() => new Map(
+    (recipientRotationPlan?.records ?? []).map((record) => [record.profile_id, record])
+  ), [recipientRotationPlan]);
   const bundleRecipientsProvided = bundleRecipientInputsToArray(bundleRecipientInputs).length > 0 || selectedRecipientProfiles.length > 0;
   const bundleEncryptionInputConflict = bundlePassphraseProvided && (bundleKeyProvided || bundleKeychainProvided || bundleRecipientsProvided);
   const bundleEncryptedExportSelected = bundlePassphraseProvided || bundleKeyProvided || bundleKeychainProvided || bundleRecipientsProvided;
@@ -1530,6 +1566,16 @@ export function App() {
                   <h3>Trusted recipients</h3>
                   <span>{selectedRecipientProfiles.length}/{recipientProfiles.length} selected for export</span>
                 </div>
+                {recipientRotationPlan && (
+                  <div className="notice">
+                    <strong>Rotation health:</strong> {recipientRotationPlan.active_count} active · {recipientRotationPlan.stale_count} stale · rotates after {recipientRotationPlan.stale_after_days} days.
+                    {recipientRotationPlan.warnings.length > 0 && (
+                      <ul>
+                        {recipientRotationPlan.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+                      </ul>
+                    )}
+                  </div>
+                )}
                 <label>
                   Trusted recipient label
                   <input value={recipientProfileLabel} onChange={(event) => setRecipientProfileLabel(event.target.value)} placeholder="Windows desktop / MacBook Pro / WSL dev box" />
@@ -1560,8 +1606,19 @@ export function App() {
                       <label key={profile.id} className="operationItem">
                         <input type="checkbox" checked={selectedRecipientProfileIds.includes(profile.id)} disabled={profile.revoked} onChange={() => toggleRecipientProfile(profile.id)} />
                         <span>
-                          <strong>{profile.label}</strong> · {profile.platform_hint || 'unknown platform'} · {profile.device_hint || 'no device hint'}
-                          <small>{profile.revoked ? 'revoked' : 'trusted'} · {shortText(profile.age_recipient, 28)} · {profile.note || 'No trust note; forgetting only removes this local profile, not the remote key.'}</small>
+                          {(() => {
+                            const rotation = recipientRotationRecordByProfileId.get(profile.id);
+                            return (
+                              <>
+                                <strong>{profile.label}</strong> · {profile.platform_hint || 'unknown platform'} · {profile.device_hint || 'no device hint'} · {rotation?.stale ? 'stale' : 'fresh'} {rotation ? `(${rotation.age_days}d)` : ''}
+                                <small>{profile.revoked ? 'revoked' : 'trusted'} · {shortText(profile.age_recipient, 28)} · {profile.note || 'No trust note; forgetting only removes this local profile, not the remote key.'}</small>
+                                {rotation?.warnings.map((warning) => <small key={warning}>Warning: {warning}</small>)}
+                                {rotation?.stale && rotation.recommended_actions.length > 0 && (
+                                  <small>Rotate: {rotation.recommended_actions.slice(-3).join(' → ')}</small>
+                                )}
+                              </>
+                            );
+                          })()}
                           <button type="button" className="secondary dangerButton smallButton" onClick={(event) => {
                             event.preventDefault();
                             void forgetRecipientProfile(profile);

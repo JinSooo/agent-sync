@@ -18,8 +18,9 @@ use agent_sync_apply::{
 use agent_sync_bundle::{
     BUNDLE_RECIPIENT_PROFILE_KIND, BundleDeviceKeySummary, BundleExportOptions,
     BundleFileDecryptionOptions, BundleFileEncryptionOptions, BundleRecipientProfile,
-    PayloadSelectionRef, SyncBundle, SyncBundleManifest, bundle_recipient_from_input,
-    bundle_recipient_profile_from_input, delete_bundle_device_key_keyring, export_bundle,
+    BundleRecipientRotationPlan, PayloadSelectionRef, SyncBundle, SyncBundleManifest,
+    bundle_recipient_from_input, bundle_recipient_profile_from_input,
+    bundle_recipient_rotation_plan, delete_bundle_device_key_keyring, export_bundle,
     export_bundle_device_key_keyring_backup, generate_bundle_device_key_file,
     generate_bundle_device_key_keyring, manifest_from_snapshot, read_bundle_device_key_file,
     read_bundle_device_key_keyring, read_bundle_file_with_decryption,
@@ -572,6 +573,18 @@ fn list_bundle_recipient_profiles(db_path: String) -> Result<Vec<BundleRecipient
         .collect()
 }
 
+#[tauri::command]
+fn bundle_recipient_rotation_plan_command(
+    db_path: String,
+    stale_after_days: Option<i64>,
+) -> Result<BundleRecipientRotationPlan, String> {
+    let profiles = list_bundle_recipient_profiles(db_path)?;
+    Ok(bundle_recipient_rotation_plan(
+        &profiles,
+        stale_after_days.unwrap_or(90),
+    ))
+}
+
 fn nonempty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.is_empty())
 }
@@ -687,7 +700,8 @@ pub fn run() {
             list_store_records,
             delete_store_record,
             save_bundle_recipient_profile,
-            list_bundle_recipient_profiles
+            list_bundle_recipient_profiles,
+            bundle_recipient_rotation_plan_command
         ])
         .run(tauri::generate_context!())
         .expect("error while running Agent Sync Studio");

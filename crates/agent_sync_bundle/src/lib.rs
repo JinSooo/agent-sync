@@ -116,6 +116,34 @@ pub struct BundleRecipientProfile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BundleRecipientRotationRecord {
+    pub profile_id: Uuid,
+    pub label: String,
+    pub device_hint: Option<String>,
+    pub platform_hint: Option<String>,
+    pub age_recipient: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub revoked: bool,
+    pub age_days: i64,
+    pub stale: bool,
+    pub warnings: Vec<String>,
+    pub recommended_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BundleRecipientRotationPlan {
+    pub schema_version: String,
+    pub generated_at: DateTime<Utc>,
+    pub stale_after_days: i64,
+    pub active_count: usize,
+    pub stale_count: usize,
+    pub revoked_count: usize,
+    pub warnings: Vec<String>,
+    pub records: Vec<BundleRecipientRotationRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct BundleDeviceKeyBackupPayload {
     schema_version: String,
     backed_up_at: DateTime<Utc>,
@@ -698,6 +726,123 @@ pub fn bundle_recipient_profile_from_input(
     })
 }
 
+pub fn bundle_recipient_rotation_plan(
+    profiles: &[BundleRecipientProfile],
+    stale_after_days: i64,
+) -> BundleRecipientRotationPlan {
+    let stale_after_days = stale_after_days.max(1);
+    let now = Utc::now();
+    let mut active_count = 0;
+    let mut stale_count = 0;
+    let mut revoked_count = 0;
+    let mut warnings = Vec::new();
+    let records = profiles
+        .iter()
+        .map(|profile| {
+            let age_days = now
+                .signed_duration_since(profile.created_at)
+                .num_days()
+                .max(0);
+            let stale = !profile.revoked && age_days >= stale_after_days;
+            if profile.revoked {
+                revoked_count += 1;
+            } else {
+                active_count += 1;
+            }
+            if stale {
+                stale_count += 1;
+            }
+
+            let mut record_warnings = Vec::new();
+            let mut recommended_actions = Vec::new();
+            if profile.revoked {
+                record_warnings.push(
+                    "Profile is forgotten locally; do not select it for new exports.".to_string(),
+                );
+                recommended_actions.push(
+                    "Confirm the remote device has rotated or deleted the matching private key."
+                        .to_string(),
+                );
+            } else {
+                recommended_actions.push(
+                    "Keep selected only while the remote device and owner are still trusted."
+                        .to_string(),
+                );
+                if stale {
+                    record_warnings.push(format!(
+                        "Trusted recipient is {age_days} days old; rotate after {stale_after_days} days."
+                    ));
+                    recommended_actions.push(
+                        "On the remote device, store or rotate a new Agent Sync bundle key."
+                            .to_string(),
+                    );
+                    recommended_actions.push(
+                        "Export that remote public recipient and save it as a new trusted profile."
+                            .to_string(),
+                    );
+                    recommended_actions.push(
+                        "Verify a new encrypted bundle with the new profile, then forget this old local profile."
+                            .to_string(),
+                    );
+                }
+                if profile.note.as_deref().unwrap_or_default().trim().is_empty() {
+                    record_warnings.push(
+                        "Missing trust note; future you cannot tell why this recipient was accepted."
+                            .to_string(),
+                    );
+                    recommended_actions.push(
+                        "Add a trust note outside this profile record or replace it with a documented profile."
+                            .to_string(),
+                    );
+                }
+                if profile.device_hint.as_deref().unwrap_or_default().trim().is_empty() {
+                    record_warnings.push(
+                        "Missing device hint; recipient ownership may be ambiguous.".to_string(),
+                    );
+                }
+            }
+
+            BundleRecipientRotationRecord {
+                profile_id: profile.id,
+                label: profile.label.clone(),
+                device_hint: profile.device_hint.clone(),
+                platform_hint: profile.platform_hint.clone(),
+                age_recipient: profile.age_recipient.clone(),
+                created_at: profile.created_at,
+                updated_at: profile.updated_at,
+                revoked: profile.revoked,
+                age_days,
+                stale,
+                warnings: record_warnings,
+                recommended_actions,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if stale_count > 0 {
+        warnings.push(format!(
+            "{stale_count} trusted recipient profile(s) are stale and should be rotated before future cross-device exports."
+        ));
+    }
+    if active_count == 0 {
+        warnings.push(
+            "No active trusted recipient profiles are saved; encrypted exports must use a passphrase, key file, keychain account, or direct recipient input."
+                .to_string(),
+        );
+    }
+
+    BundleRecipientRotationPlan {
+        schema_version: "0.2".to_string(),
+        generated_at: now,
+        stale_after_days,
+        active_count,
+        stale_count,
+        revoked_count,
+        warnings,
+        records,
+    }
+}
+
 fn trimmed_optional(value: Option<String>) -> Option<String> {
     value.and_then(|value| {
         let value = value.trim().to_string();
@@ -942,6 +1087,51 @@ mod tests {
         assert_eq!(profile.source, "manual paste");
         assert_eq!(profile.note.as_deref(), Some("use for work bundles"));
         assert!(!profile.revoked);
+    }
+
+    #[test]
+    fn builds_recipient_rotation_plan_with_stale_warnings() {
+        let key = generate_bundle_device_key();
+        let mut stale = bundle_recipient_profile_from_input(
+            "Old laptop",
+            Some("macbook".into()),
+            Some("macos".into()),
+            &key.age_recipient,
+            None,
+            Some("test".into()),
+        )
+        .unwrap();
+        stale.created_at = Utc::now() - chrono::Duration::days(120);
+
+        let fresh_key = generate_bundle_device_key();
+        let fresh = bundle_recipient_profile_from_input(
+            "Fresh desktop",
+            Some("win-dev".into()),
+            Some("windows".into()),
+            &fresh_key.age_recipient,
+            Some("paired during setup".into()),
+            Some("test".into()),
+        )
+        .unwrap();
+
+        let plan = bundle_recipient_rotation_plan(&[stale, fresh], 90);
+        assert_eq!(plan.active_count, 2);
+        assert_eq!(plan.stale_count, 1);
+        assert_eq!(plan.records.len(), 2);
+        let stale_record = plan.records.iter().find(|record| record.stale).unwrap();
+        assert!(stale_record.age_days >= 90);
+        assert!(
+            stale_record
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("rotate"))
+        );
+        assert!(
+            stale_record
+                .recommended_actions
+                .iter()
+                .any(|action| action.contains("new trusted profile"))
+        );
     }
 
     #[test]

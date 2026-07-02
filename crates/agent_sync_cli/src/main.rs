@@ -13,10 +13,10 @@ use agent_sync_bundle::{
     BUNDLE_RECIPIENT_PROFILE_KIND, BundleDeviceKeySummary, BundleExportOptions,
     BundleFileDecryptionOptions, BundleFileEncryptionOptions, BundleRecipientProfile,
     DEFAULT_BUNDLE_KEYRING_ACCOUNT, PayloadSelectionRef, bundle_recipient_from_input,
-    bundle_recipient_profile_from_input, delete_bundle_device_key_keyring, export_bundle,
-    export_bundle_device_key_keyring_backup, generate_bundle_device_key_file,
-    generate_bundle_device_key_keyring, manifest_from_snapshot, read_bundle_device_key_file,
-    read_bundle_device_key_keyring, read_bundle_file_with_decryption,
+    bundle_recipient_profile_from_input, bundle_recipient_rotation_plan,
+    delete_bundle_device_key_keyring, export_bundle, export_bundle_device_key_keyring_backup,
+    generate_bundle_device_key_file, generate_bundle_device_key_keyring, manifest_from_snapshot,
+    read_bundle_device_key_file, read_bundle_device_key_keyring, read_bundle_file_with_decryption,
     restore_bundle_device_key_keyring_backup, verify_bundle, write_bundle_file_with_encryption,
     write_bundle_recipient_file,
 };
@@ -126,6 +126,11 @@ fn main() -> anyhow::Result<()> {
         "list-bundle-recipient-profiles" => {
             let profiles = load_bundle_recipient_profiles(&args)?;
             println!("{}", serde_json::to_string_pretty(&profiles)?);
+        }
+        "bundle-recipient-rotation-plan" => {
+            let profiles = load_bundle_recipient_profiles(&args)?;
+            let plan = bundle_recipient_rotation_plan(&profiles, stale_after_days(&args)?);
+            println!("{}", serde_json::to_string_pretty(&plan)?);
         }
         "forget-bundle-recipient-profile" => {
             let id = value_after(&args, "--id")
@@ -344,7 +349,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|generate-bundle-keychain|export-bundle-recipient|export-bundle-keychain-recipient|forget-bundle-keychain|export-bundle-keychain-backup|restore-bundle-keychain-backup|save-bundle-recipient-profile|list-bundle-recipient-profiles|forget-bundle-recipient-profile|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|dry-run-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--store PATH] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH|--bundle-keychain ACCOUNT|--bundle-recipient AGE_OR_JSON|--bundle-recipient-profile PROFILE_ID --allow-unencrypted-sensitive-payloads] [--backup-passphrase PASSPHRASE] [--target-home PATH --target-project PATH --session-target SESSION_ID=PROJECT_PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
+                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|generate-bundle-keychain|export-bundle-recipient|export-bundle-keychain-recipient|forget-bundle-keychain|export-bundle-keychain-backup|restore-bundle-keychain-backup|save-bundle-recipient-profile|list-bundle-recipient-profiles|bundle-recipient-rotation-plan|forget-bundle-recipient-profile|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|dry-run-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--store PATH] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH|--bundle-keychain ACCOUNT|--bundle-recipient AGE_OR_JSON|--bundle-recipient-profile PROFILE_ID --allow-unencrypted-sensitive-payloads] [--backup-passphrase PASSPHRASE] [--stale-days N] [--target-home PATH --target-project PATH --session-target SESSION_ID=PROJECT_PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
             );
             std::process::exit(2);
         }
@@ -531,6 +536,15 @@ fn store_path(args: &[String]) -> PathBuf {
     value_after(args, "--store")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("agent-sync-studio.sqlite"))
+}
+
+fn stale_after_days(args: &[String]) -> anyhow::Result<i64> {
+    let value = value_after(args, "--stale-days").unwrap_or_else(|| "90".to_string());
+    let days = value.parse::<i64>()?;
+    if days < 1 {
+        anyhow::bail!("--stale-days must be at least 1");
+    }
+    Ok(days)
 }
 
 fn load_bundle_recipient_profiles(args: &[String]) -> anyhow::Result<Vec<BundleRecipientProfile>> {
