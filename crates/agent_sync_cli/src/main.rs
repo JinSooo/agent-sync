@@ -1,4 +1,7 @@
-use agent_sync_apply::{create_journal, preflight};
+use agent_sync_apply::{
+    SessionNativeFileImportOptions, create_journal, import_session_payloads_to_native_files,
+    preflight,
+};
 use agent_sync_bundle::{
     BundleExportOptions, export_bundle, manifest_from_snapshot, read_bundle_file, verify_bundle,
     write_bundle_file,
@@ -61,6 +64,33 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
+        "import-native-sessions" => {
+            let input =
+                value_after(&args, "--input").unwrap_or_else(|| "agent-sync.asbundle".to_string());
+            let target_home = value_after(&args, "--target-home")
+                .map(PathBuf::from)
+                .or_else(|| env::var_os("HOME").map(PathBuf::from))
+                .unwrap_or_else(|| PathBuf::from("."));
+            let target_project = value_after(&args, "--target-project");
+            let backup_dir = value_after(&args, "--backup-dir")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("agent-sync-backups"));
+            let selected_session_ids = values_after(&args, "--session");
+            let bundle = read_bundle_file(input)?;
+            let journal = import_session_payloads_to_native_files(
+                &bundle,
+                &SessionNativeFileImportOptions {
+                    selected_session_ids,
+                    target_home,
+                    target_project,
+                    backup_dir,
+                    rewrite_project_identity: !args
+                        .iter()
+                        .any(|arg| arg == "--no-rewrite-project-identity"),
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&journal)?);
+        }
         "self-plan" => {
             let snapshot = scan_device(default_scan_options(&args))?;
             let plan = create_transform_plan(&snapshot, &snapshot, None);
@@ -73,7 +103,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|self-plan] [--home PATH] [--project PATH] [--output PATH] [--input PATH] [--include-session-payloads --session SESSION_ID]"
+                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|import-native-sessions|self-plan] [--home PATH] [--project PATH] [--output PATH] [--input PATH] [--include-session-payloads --session SESSION_ID] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity]"
             );
             std::process::exit(2);
         }

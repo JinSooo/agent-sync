@@ -10,7 +10,7 @@ Scan -> Select -> Transform -> Preview -> Apply -> Verify/Rollback
 
 ## Runtime split
 
-- React/Vite frontend: control plane only, including native Tauri dialog pickers for bundle/project/backup paths.
+- React/Vite frontend: control plane only, including native Tauri dialog pickers for bundle/home/project/backup paths.
 - Tauri commands: narrow IPC boundary.
 - Rust crates: all filesystem, bundle, transform, apply, backup, and storage work.
 
@@ -24,7 +24,7 @@ The frontend must not directly read or write `~/.codex`, `~/.claude`, raw sessio
 | `agent_sync_scan` | Codex/Claude surface scan and metadata-only session discovery |
 | `agent_sync_transform` | Snapshot diff, project mapping, and transform-plan generation |
 | `agent_sync_bundle` | `.asbundle` source snapshot, manifest, payload, redaction, and checksum handling |
-| `agent_sync_apply` | Preflight, operation journal, safe payload apply with backups |
+| `agent_sync_apply` | Preflight, operation journal, safe payload apply, session native-file import with backups |
 | `agent_sync_storage` | Agent Sync Studio local SQLite record store |
 | `agent_sync_adapters_codex` | Codex adapter capabilities and session metadata entry point |
 | `agent_sync_adapters_claude` | Claude Code adapter capabilities and session metadata entry point |
@@ -49,6 +49,8 @@ Review-required:
 Automatically applicable today:
 
 - safe text config payloads from a verified bundle, with backup and checksum verification.
+- metadata-only session archive records into Agent Sync Studio SQLite storage.
+- explicitly selected raw session payloads into isolated staging, or into native Codex/Claude file locations under a chosen target home. Native file import is allowlisted to `~/.codex/**` and `~/.claude/**`, backs up existing files, optionally rewrites source project paths to the target project path, and verifies written checksums.
 
 ## Current implementation status
 
@@ -59,15 +61,15 @@ Implemented:
 - Real `.asbundle` JSON container with source snapshot, payload checksums, metadata-only session archive entries, explicitly selected raw session payloads, and secret redactions.
 - Local SQLite store for snapshots/plans/journals as JSON records.
 - Safe config apply path with visual operation selection, backup, operation journal, and checksum verification.
-- Session Library flow: choose local sessions for raw payload export; choose remote Codex/Claude session archives, bind them to the target project path, import metadata-only records into local Agent Sync Studio SQLite storage, or stage selected raw payloads into an isolated native-import directory with project-path rewrite evidence.
-- Rust CLI: `scan`, `bundle-manifest`, `export-bundle`, `verify-bundle`, `self-plan`.
+- Session Library flow: choose local sessions for raw payload export; choose remote Codex/Claude session archives, bind them to the target home/project path, import metadata-only records into local Agent Sync Studio SQLite storage, stage selected raw payloads into an isolated native-import directory, or write selected payloads to native Codex/Claude session-file locations with project-path rewrite evidence.
+- Rust CLI: `scan`, `bundle-manifest`, `export-bundle`, `verify-bundle`, `import-native-sessions`, `self-plan`.
 
 Implemented in the current product loop:
 
-- Native file picker flow for bundle import/export, target project, and backup directory.
+- Native file picker flow for bundle import/export, target home, target project, staging, and backup directory.
 - Project-mapping UI with git-remote exact match, basename fallback, confidence, and manual-review warning.
 
 Still to deepen:
-- Codex native session import/remap from staging into Codex-owned indexes/databases; direct native writes remain adapter-specific future work.
-- Claude Code native session import/remap from staging into Claude-owned indexes/databases; direct native writes remain adapter-specific future work.
+- Codex native session import/remap into Codex-owned indexes/databases; direct database/index writes remain adapter-specific future work.
+- Claude Code native session import/remap into Claude-owned indexes/databases; direct database/index writes remain adapter-specific future work.
 - Encrypted bundle payloads for sensitive selected content.

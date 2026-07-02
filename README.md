@@ -8,12 +8,12 @@ Scan -> Select -> Transform -> Preview -> Apply -> Verify/Rollback
 
 ## Current architecture
 
-- `apps/desktop`: Tauri 2 + React/Vite desktop control plane with native bundle/project/backup path pickers.
+- `apps/desktop`: Tauri 2 + React/Vite desktop control plane with native bundle/home/project/backup path pickers.
 - `crates/agent_sync_core`: domain models, safety classes, path redaction/classification.
 - `crates/agent_sync_scan`: Rust scanner for Codex and Claude Code surfaces.
 - `crates/agent_sync_transform`: snapshot diff, project-mapping suggestions, and transform-plan generation.
 - `crates/agent_sync_bundle`: `.asbundle` source snapshot, manifest, payload, checksum, and redaction handling.
-- `crates/agent_sync_apply`: preflight, operation journal, safe payload apply, backup, and checksum verification.
+- `crates/agent_sync_apply`: preflight, operation journal, safe payload apply, session native-file import, backup, and checksum verification.
 - `crates/agent_sync_adapters_codex`: Codex adapter capability and session metadata entry points.
 - `crates/agent_sync_adapters_claude`: Claude Code adapter capability and session metadata entry points.
 - `crates/agent_sync_cli`: Rust CLI that uses the same core as the desktop app.
@@ -31,6 +31,7 @@ The older Node CLI remains available as a legacy reference while the Rust/Tauri 
 - Choose local Codex/Claude sessions whose raw payloads should be included in the next bundle.
 - Choose remote Codex/Claude session archives and import them into the local Agent Sync Studio archive store with target-project mapping.
 - Stage selected raw session payloads into an isolated native-import directory with optional source-project to target-project path rewriting.
+- Import selected raw session payloads into the target home as native Codex/Claude session files, limited to `~/.codex/**` and `~/.claude/**`, with backup, path rewriting, and checksum journal.
 - Apply selected safe payloads with backups and checksum verification.
 - Persist snapshots in a local SQLite record store.
 
@@ -44,6 +45,7 @@ cargo run -p agent_sync_cli -- bundle-manifest
 cargo run -p agent_sync_cli -- export-bundle --output agent-sync-local.asbundle
 cargo run -p agent_sync_cli -- export-bundle --output agent-sync-sessions.asbundle --include-session-payloads --session "codex:session-id"
 cargo run -p agent_sync_cli -- verify-bundle --input agent-sync-local.asbundle
+cargo run -p agent_sync_cli -- import-native-sessions --input agent-sync-sessions.asbundle --target-home "$HOME" --target-project "$PWD" --backup-dir agent-sync-backups --session "codex:session-id"
 cargo run -p agent_sync_cli -- self-plan
 
 # Desktop frontend and app
@@ -76,6 +78,7 @@ Automatically applicable today:
 
 - safe text config payloads from a verified bundle, only through selected operations, with backup and checksum verification.
 - metadata-only session archive records into Agent Sync Studio SQLite storage.
-- selected raw session payloads into an isolated staging directory with project-path rewrite journal. This does not rewrite native Codex/Claude session databases.
+- selected raw session payloads into an isolated staging directory with project-path rewrite journal.
+- selected raw session payloads into native Codex/Claude file locations under a chosen target home, with strict `~/.codex/**` / `~/.claude/**` allowlisting, backup, optional project-path rewrite, and checksum verification. This does not rewrite native Codex/Claude databases or secondary indexes.
 
 See `.omx/plans/agent-sync-studio-full-architecture-20260701.md` and `docs/agent-sync-studio-architecture.md` for the full implementation architecture.

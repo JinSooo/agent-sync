@@ -1,7 +1,8 @@
 use agent_sync_apply::{
     ApplyContext, OperationJournal, PreflightReport, SessionArchiveImportJournal,
-    SessionArchiveImportOptions, SessionNativeImportStageJournal, SessionNativeImportStageOptions,
-    apply_safe_payloads, create_journal, import_session_archives, preflight,
+    SessionArchiveImportOptions, SessionNativeFileImportJournal, SessionNativeFileImportOptions,
+    SessionNativeImportStageJournal, SessionNativeImportStageOptions, apply_safe_payloads,
+    create_journal, import_session_archives, import_session_payloads_to_native_files, preflight,
     stage_session_native_import,
 };
 use agent_sync_bundle::{
@@ -185,6 +186,32 @@ fn stage_session_native_import_command(
 }
 
 #[tauri::command]
+fn import_session_payloads_to_native_files_command(
+    bundle: SyncBundle,
+    selected_session_ids: Vec<String>,
+    target_home: Option<String>,
+    target_project: Option<String>,
+    backup_dir: String,
+    rewrite_project_identity: Option<bool>,
+) -> Result<SessionNativeFileImportJournal, String> {
+    let target_home = target_home
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    import_session_payloads_to_native_files(
+        &bundle,
+        &SessionNativeFileImportOptions {
+            selected_session_ids,
+            target_home,
+            target_project,
+            backup_dir: PathBuf::from(backup_dir),
+            rewrite_project_identity: rewrite_project_identity.unwrap_or(true),
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn save_snapshot_to_store(db_path: String, snapshot: DeviceSnapshot) -> Result<String, String> {
     let store = AgentSyncStore::open(db_path).map_err(|error| error.to_string())?;
     store
@@ -214,6 +241,7 @@ pub fn run() {
             apply_safe_payloads_command,
             import_session_archives_command,
             stage_session_native_import_command,
+            import_session_payloads_to_native_files_command,
             save_snapshot_to_store,
             list_store_records
         ])

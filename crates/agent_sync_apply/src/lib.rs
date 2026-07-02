@@ -152,6 +152,52 @@ pub struct StagedPayloadRecord {
     pub project_identity_rewritten: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionNativeFileImportOptions {
+    pub selected_session_ids: Vec<String>,
+    pub target_home: PathBuf,
+    pub target_project: Option<String>,
+    pub backup_dir: PathBuf,
+    pub rewrite_project_identity: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionNativeFileImportJournal {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub bundle_id: Uuid,
+    pub source_snapshot: Uuid,
+    pub selected: usize,
+    pub imported: usize,
+    pub skipped: usize,
+    pub records: Vec<SessionNativeFileImportRecord>,
+    pub status: JournalStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionNativeFileImportRecord {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub session_id: String,
+    pub title: Option<String>,
+    pub source_project: Option<String>,
+    pub target_project: Option<String>,
+    pub written_payloads: Vec<NativeFilePayloadRecord>,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeFilePayloadRecord {
+    pub portable_path: String,
+    pub target_path: String,
+    pub backup_path: Option<String>,
+    pub source_sha256: String,
+    pub written_sha256: Option<String>,
+    pub project_identity_rewritten: bool,
+    pub status: JournalOperationStatus,
+    pub message: Option<String>,
+}
+
 pub fn create_journal(plan: &TransformPlan) -> OperationJournal {
     OperationJournal {
         id: Uuid::new_v4(),
@@ -316,6 +362,214 @@ pub fn stage_session_native_import(
         skipped: selected.saturating_sub(staged),
         records,
         status: JournalStatus::Completed,
+    })
+}
+
+pub fn import_session_payloads_to_native_files(
+    bundle: &SyncBundle,
+    options: &SessionNativeFileImportOptions,
+) -> std::io::Result<SessionNativeFileImportJournal> {
+    fs::create_dir_all(&options.backup_dir)?;
+    let mut records = Vec::new();
+    let selected = options.selected_session_ids.len();
+
+    for archive in &bundle.session_archives {
+        if !options
+            .selected_session_ids
+            .iter()
+            .any(|id| id == &archive.session.id)
+        {
+            continue;
+        }
+        if archive.payloads.is_empty() {
+            continue;
+        }
+
+        let mut written_payloads = Vec::new();
+        for payload in &archive.payloads {
+            let Some(target_path_result) = native_session_target_path(
+                archive.agent_id.as_str(),
+                payload.portable_path.as_str(),
+                &options.target_home,
+            ) else {
+                written_payloads.push(NativeFilePayloadRecord {
+                    portable_path: payload.portable_path.clone(),
+                    target_path: String::new(),
+                    backup_path: None,
+                    source_sha256: payload.sha256.clone(),
+                    written_sha256: None,
+                    project_identity_rewritten: false,
+                    status: JournalOperationStatus::Blocked,
+                    message: Some(
+                        "native file import only allows Codex ~/.codex/** or Claude ~/.claude/** session payload paths"
+                            .to_string(),
+                    ),
+                });
+                continue;
+            };
+            let target_path = target_path_result?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&payload.base64_content)
+                .map_err(std::io::Error::other)?;
+            let source_sha = format!("{:x}", Sha256::digest(&bytes));
+            if source_sha != payload.sha256 {
+                written_payloads.push(NativeFilePayloadRecord {
+                    portable_path: payload.portable_path.clone(),
+                    target_path: target_path.display().to_string(),
+                    backup_path: None,
+                    source_sha256: payload.sha256.clone(),
+                    written_sha256: None,
+                    project_identity_rewritten: false,
+                    status: JournalOperationStatus::Failed,
+                    message: Some("payload checksum mismatch".to_string()),
+                });
+                continue;
+            }
+
+            let (next_bytes, rewritten) = rewrite_session_project_identity(
+                bytes,
+                archive
+                    .source_project
+                    .as_ref()
+                    .map(|project| project.canonical_path.as_str()),
+                archive
+                    .source_project
+                    .as_ref()
+                    .and_then(|project| project.physical_path.as_deref()),
+                options.target_project.as_deref(),
+                options.rewrite_project_identity,
+            );
+            let written_sha = format!("{:x}", Sha256::digest(&next_bytes));
+
+            if let Some(parent) = target_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            let backup_path = if target_path.exists() {
+                let backup = options.backup_dir.join(format!(
+                    "{}-{}",
+                    Uuid::new_v4(),
+                    sanitize_path(&payload.portable_path)
+                ));
+                fs::copy(&target_path, &backup)?;
+                Some(backup)
+            } else {
+                None
+            };
+
+            fs::write(&target_path, &next_bytes)?;
+            let after = fs::read(&target_path)?;
+            let after_sha = format!("{:x}", Sha256::digest(&after));
+            let (status, message) = if after_sha == written_sha {
+                (
+                    JournalOperationStatus::Verified,
+                    Some("native file written and checksum verified".to_string()),
+                )
+            } else {
+                (
+                    JournalOperationStatus::Failed,
+                    Some("written checksum mismatch".to_string()),
+                )
+            };
+
+            written_payloads.push(NativeFilePayloadRecord {
+                portable_path: payload.portable_path.clone(),
+                target_path: target_path.display().to_string(),
+                backup_path: backup_path.map(|path| path.display().to_string()),
+                source_sha256: payload.sha256.clone(),
+                written_sha256: Some(after_sha),
+                project_identity_rewritten: rewritten,
+                status,
+                message,
+            });
+        }
+
+        records.push(SessionNativeFileImportRecord {
+            agent_id: archive.agent_id.clone(),
+            agent_name: archive.agent_name.clone(),
+            session_id: archive.session.id.clone(),
+            title: archive.session.title.clone(),
+            source_project: archive
+                .source_project
+                .as_ref()
+                .map(|project| project.canonical_path.clone()),
+            target_project: options.target_project.clone(),
+            written_payloads,
+            note: "native file import only; Codex/Claude databases and secondary indexes are not modified"
+                .to_string(),
+        });
+    }
+
+    let imported = records
+        .iter()
+        .filter(|record| {
+            record
+                .written_payloads
+                .iter()
+                .any(|payload| payload.status == JournalOperationStatus::Verified)
+        })
+        .count();
+    let failed = records.iter().any(|record| {
+        record
+            .written_payloads
+            .iter()
+            .any(|payload| payload.status == JournalOperationStatus::Failed)
+    });
+
+    Ok(SessionNativeFileImportJournal {
+        id: Uuid::new_v4(),
+        created_at: Utc::now(),
+        bundle_id: bundle.manifest.id,
+        source_snapshot: bundle.source_snapshot.id,
+        selected,
+        imported,
+        skipped: selected.saturating_sub(imported),
+        records,
+        status: if failed {
+            JournalStatus::Failed
+        } else {
+            JournalStatus::Completed
+        },
+    })
+}
+
+fn native_session_target_path(
+    agent_id: &str,
+    portable_path: &str,
+    target_home: &Path,
+) -> Option<std::io::Result<PathBuf>> {
+    let allowed_prefix = match agent_id {
+        "codex" => "~/.codex/",
+        "claude" => "~/.claude/",
+        _ => return None,
+    };
+    let rest = portable_path.strip_prefix(allowed_prefix)?;
+    if !is_safe_portable_relative_path(rest) {
+        return Some(Err(std::io::Error::other(format!(
+            "unsafe native session payload path: {}",
+            portable_path
+        ))));
+    }
+    Some(Ok(target_home
+        .join(allowed_prefix.trim_start_matches("~/"))
+        .join(rest)))
+}
+
+fn is_safe_portable_relative_path(rest: &str) -> bool {
+    if rest.is_empty()
+        || rest.starts_with('/')
+        || rest.starts_with('\\')
+        || rest.contains('\0')
+        || rest.contains('\\')
+    {
+        return false;
+    }
+    rest.split('/').all(|segment| {
+        !segment.is_empty()
+            && segment != "."
+            && segment != ".."
+            && !segment.contains(':')
+            && !segment.contains('\0')
     })
 }
 
@@ -803,6 +1057,211 @@ mod tests {
             fs::read_to_string(&journal.records[0].written_payloads[0].staged_path).unwrap();
         assert!(staged_text.contains(target_project));
         assert!(!staged_text.contains(source_project));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn imports_session_payloads_to_native_files_with_backup() {
+        let root = std::env::temp_dir().join(format!("agent-sync-native-{}", Uuid::new_v4()));
+        let target_home = root.join("target-home");
+        let backup = root.join("backup");
+        let source_project = "/Users/me/source-project";
+        let target_project = "C:/Users/me/target-project";
+        let target_file = target_home
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("07")
+            .join("02")
+            .join("rollout.jsonl");
+        fs::create_dir_all(target_file.parent().unwrap()).unwrap();
+        fs::write(&target_file, "old native session").unwrap();
+
+        let bytes = format!("{{\"cwd\":\"{}\",\"text\":\"hello\"}}\n", source_project).into_bytes();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let session = agent_sync_core::SessionRecord {
+            id: "codex:session-1".into(),
+            agent_id: "codex".into(),
+            title: Some("Session 1".into()),
+            created_at: None,
+            updated_at: None,
+            source_project: None,
+            storage_refs: vec![],
+            visibility: agent_sync_core::SessionVisibility::Unknown,
+            content_policy: agent_sync_core::ContentPolicy::ExplicitRawPayloadRequired,
+            import_capabilities: agent_sync_core::SessionImportCapabilities::default(),
+        };
+        let bundle = SyncBundle {
+            manifest: agent_sync_bundle::SyncBundleManifest {
+                schema_version: "0.2".into(),
+                id: Uuid::new_v4(),
+                created_at: Utc::now(),
+                source_snapshot: Uuid::new_v4(),
+                selections: vec![],
+                redactions: vec![],
+                encryption: agent_sync_bundle::BundleEncryptionInfo {
+                    required_for_sensitive_payloads: true,
+                    method: "none".into(),
+                },
+            },
+            source_snapshot: agent_sync_core::DeviceSnapshot {
+                schema_version: "0.2".into(),
+                id: Uuid::new_v4(),
+                generated_at: Utc::now(),
+                platform: agent_sync_core::PlatformInfo {
+                    os: "test".into(),
+                    arch: "test".into(),
+                },
+                inputs: agent_sync_core::SnapshotInputs {
+                    home: "~".into(),
+                    project: source_project.into(),
+                    max_depth: 1,
+                    max_entries: 10,
+                },
+                summary: agent_sync_core::SnapshotSummary::default(),
+                projects: vec![],
+                agents: vec![],
+            },
+            payloads: vec![],
+            session_archives: vec![agent_sync_bundle::SessionArchiveEntry {
+                agent_id: "codex".into(),
+                agent_name: "Codex".into(),
+                session,
+                source_project: Some(agent_sync_core::ProjectIdentity {
+                    id: Uuid::new_v4(),
+                    canonical_path: source_project.into(),
+                    physical_path: Some(source_project.into()),
+                    git_remote: None,
+                    git_root_fingerprint: None,
+                    package_name: None,
+                    agent_project_keys: vec![],
+                }),
+                payload_included: true,
+                payloads: vec![PayloadEntry {
+                    agent_id: "codex".into(),
+                    portable_path: "~/.codex/sessions/2026/07/02/rollout.jsonl".into(),
+                    sha256: sha,
+                    base64_content: base64::engine::general_purpose::STANDARD.encode(bytes),
+                }],
+                import_note: "raw payload included".into(),
+            }],
+        };
+
+        let journal = import_session_payloads_to_native_files(
+            &bundle,
+            &SessionNativeFileImportOptions {
+                selected_session_ids: vec!["codex:session-1".into()],
+                target_home: target_home.clone(),
+                target_project: Some(target_project.into()),
+                backup_dir: backup.clone(),
+                rewrite_project_identity: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(journal.status, JournalStatus::Completed);
+        assert_eq!(journal.imported, 1);
+        assert_eq!(
+            journal.records[0].written_payloads[0].status,
+            JournalOperationStatus::Verified
+        );
+        assert!(journal.records[0].written_payloads[0].backup_path.is_some());
+        let written_text = fs::read_to_string(target_file).unwrap();
+        assert!(written_text.contains(target_project));
+        assert!(!written_text.contains(source_project));
+        assert_eq!(
+            fs::read_to_string(backup.read_dir().unwrap().next().unwrap().unwrap().path()).unwrap(),
+            "old native session"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn blocks_native_session_import_outside_allowed_agent_root() {
+        let root = std::env::temp_dir().join(format!("agent-sync-native-block-{}", Uuid::new_v4()));
+        let target_home = root.join("target-home");
+        let backup = root.join("backup");
+        let bytes = b"hello".to_vec();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let session = agent_sync_core::SessionRecord {
+            id: "codex:session-1".into(),
+            agent_id: "codex".into(),
+            title: Some("Session 1".into()),
+            created_at: None,
+            updated_at: None,
+            source_project: None,
+            storage_refs: vec![],
+            visibility: agent_sync_core::SessionVisibility::Unknown,
+            content_policy: agent_sync_core::ContentPolicy::ExplicitRawPayloadRequired,
+            import_capabilities: agent_sync_core::SessionImportCapabilities::default(),
+        };
+        let bundle = SyncBundle {
+            manifest: agent_sync_bundle::SyncBundleManifest {
+                schema_version: "0.2".into(),
+                id: Uuid::new_v4(),
+                created_at: Utc::now(),
+                source_snapshot: Uuid::new_v4(),
+                selections: vec![],
+                redactions: vec![],
+                encryption: agent_sync_bundle::BundleEncryptionInfo {
+                    required_for_sensitive_payloads: true,
+                    method: "none".into(),
+                },
+            },
+            source_snapshot: agent_sync_core::DeviceSnapshot {
+                schema_version: "0.2".into(),
+                id: Uuid::new_v4(),
+                generated_at: Utc::now(),
+                platform: agent_sync_core::PlatformInfo {
+                    os: "test".into(),
+                    arch: "test".into(),
+                },
+                inputs: agent_sync_core::SnapshotInputs {
+                    home: "~".into(),
+                    project: "/tmp/project".into(),
+                    max_depth: 1,
+                    max_entries: 10,
+                },
+                summary: agent_sync_core::SnapshotSummary::default(),
+                projects: vec![],
+                agents: vec![],
+            },
+            payloads: vec![],
+            session_archives: vec![agent_sync_bundle::SessionArchiveEntry {
+                agent_id: "codex".into(),
+                agent_name: "Codex".into(),
+                session,
+                source_project: None,
+                payload_included: true,
+                payloads: vec![PayloadEntry {
+                    agent_id: "codex".into(),
+                    portable_path: "<project>/not-a-native-session.jsonl".into(),
+                    sha256: sha,
+                    base64_content: base64::engine::general_purpose::STANDARD.encode(bytes),
+                }],
+                import_note: "raw payload included".into(),
+            }],
+        };
+
+        let journal = import_session_payloads_to_native_files(
+            &bundle,
+            &SessionNativeFileImportOptions {
+                selected_session_ids: vec!["codex:session-1".into()],
+                target_home,
+                target_project: None,
+                backup_dir: backup,
+                rewrite_project_identity: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(journal.status, JournalStatus::Completed);
+        assert_eq!(journal.imported, 0);
+        assert_eq!(
+            journal.records[0].written_payloads[0].status,
+            JournalOperationStatus::Blocked
+        );
+        assert!(!root.join("target-home").join("project").exists());
         let _ = fs::remove_dir_all(root);
     }
 }

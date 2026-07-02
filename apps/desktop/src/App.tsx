@@ -175,6 +175,33 @@ type SessionNativeImportStageJournal = {
   }>;
 };
 
+type SessionNativeFileImportJournal = {
+  id: string;
+  status: string;
+  selected: number;
+  imported: number;
+  skipped: number;
+  records: Array<{
+    agent_id: string;
+    agent_name: string;
+    session_id: string;
+    title?: string;
+    source_project?: string;
+    target_project?: string;
+    note: string;
+    written_payloads: Array<{
+      portable_path: string;
+      target_path: string;
+      backup_path?: string;
+      source_sha256: string;
+      written_sha256?: string;
+      project_identity_rewritten: boolean;
+      status: string;
+      message?: string;
+    }>;
+  }>;
+};
+
 const safetyOrder = ['safe_config', 'memory_knowledge', 'mcp_config', 'raw_session', 'executable', 'database', 'secret_bearing', 'binary_or_cache', 'unknown'];
 const autoApplyKinds = new Set(['merge_text', 'copy_file']);
 
@@ -191,6 +218,7 @@ export function App() {
   const [journal, setJournal] = useState<OperationJournal | null>(null);
   const [sessionArchiveJournal, setSessionArchiveJournal] = useState<SessionArchiveImportJournal | null>(null);
   const [sessionStageJournal, setSessionStageJournal] = useState<SessionNativeImportStageJournal | null>(null);
+  const [sessionNativeFileJournal, setSessionNativeFileJournal] = useState<SessionNativeFileImportJournal | null>(null);
   const [bundleManifest, setBundleManifest] = useState<SyncBundleManifest | null>(null);
   const [verifyErrors, setVerifyErrors] = useState<string[]>([]);
   const [selectedOperationIds, setSelectedOperationIds] = useState<string[]>([]);
@@ -202,6 +230,7 @@ export function App() {
   const [bundlePath, setBundlePath] = useState('agent-sync-local.asbundle');
   const [exportPath, setExportPath] = useState('agent-sync-local.asbundle');
   const [targetProjectPath, setTargetProjectPath] = useState('');
+  const [targetHomePath, setTargetHomePath] = useState('');
   const [backupDir, setBackupDir] = useState('agent-sync-backups');
   const [archiveStorePath, setArchiveStorePath] = useState('agent-sync-studio.sqlite');
   const [sessionStageDir, setSessionStageDir] = useState('agent-sync-session-staging');
@@ -218,6 +247,7 @@ export function App() {
       setJournal(null);
       setSessionArchiveJournal(null);
       setSessionStageJournal(null);
+      setSessionNativeFileJournal(null);
       setBundleManifest(null);
       setStoreMessage(null);
       setSelectedLocalSessionIds([]);
@@ -280,6 +310,7 @@ export function App() {
       setJournal(null);
       setSessionArchiveJournal(null);
       setSessionStageJournal(null);
+      setSessionNativeFileJournal(null);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -366,6 +397,27 @@ export function App() {
     }
   }
 
+  async function importSelectedSessionPayloadsToNativeFiles() {
+    if (!importedBundle) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const nextJournal = await invoke<SessionNativeFileImportJournal>('import_session_payloads_to_native_files_command', {
+        bundle: importedBundle,
+        selectedSessionIds,
+        targetHome: targetHomePath || undefined,
+        targetProject: targetProjectPath || undefined,
+        backupDir: backupDir || 'agent-sync-backups',
+        rewriteProjectIdentity: true
+      });
+      setSessionNativeFileJournal(nextJournal);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function saveSnapshot() {
     if (!snapshot) return;
     setBusy(true);
@@ -404,6 +456,12 @@ export function App() {
     const selected = await open({ directory: true, multiple: false });
     const path = singlePath(selected);
     if (path) setTargetProjectPath(path);
+  }
+
+  async function chooseTargetHome() {
+    const selected = await open({ directory: true, multiple: false });
+    const path = singlePath(selected);
+    if (path) setTargetHomePath(path);
   }
 
   async function chooseBackupDir() {
@@ -518,6 +576,11 @@ export function App() {
               </label>
               <button className="secondary" onClick={chooseTargetProject} disabled={busy}>Choose target project…</button>
               <label>
+                Target home path
+                <input value={targetHomePath} onChange={(event) => setTargetHomePath(event.target.value)} placeholder="Blank = current OS HOME" />
+              </label>
+              <button className="secondary" onClick={chooseTargetHome} disabled={busy}>Choose target home…</button>
+              <label>
                 Backup directory
                 <input value={backupDir} onChange={(event) => setBackupDir(event.target.value)} placeholder="agent-sync-backups" />
               </label>
@@ -618,6 +681,9 @@ export function App() {
               </button>
               <button className="secondary" onClick={stageSelectedSessionPayloads} disabled={!importedBundle || selectedSessionIds.length === 0 || busy}>
                 Stage selected native session payloads
+              </button>
+              <button onClick={importSelectedSessionPayloadsToNativeFiles} disabled={!importedBundle || selectedSessionIds.length === 0 || selectedRemotePayloadCount === 0 || busy}>
+                Import selected payloads to native files
               </button>
             </div>
           ) : (
@@ -755,6 +821,33 @@ export function App() {
                   <ul>
                     {record.written_payloads.map((payload) => (
                       <li key={payload.staged_path}>{payload.project_identity_rewritten ? 'rewritten' : 'copied'} · {payload.portable_path} → {payload.staged_path}</li>
+                    ))}
+                  </ul>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+        {sessionNativeFileJournal && (
+          <section className="panel">
+            <div className="panelTitle">
+              <h2>Native file import journal</h2>
+              <span>{sessionNativeFileJournal.id} · {sessionNativeFileJournal.status}</span>
+            </div>
+            <div className="chips">
+              <span className="chip safe_config">imported {sessionNativeFileJournal.imported}</span>
+              <span className="chip">selected {sessionNativeFileJournal.selected}</span>
+              <span className="chip">skipped {sessionNativeFileJournal.skipped}</span>
+            </div>
+            <ul className="operationList">
+              {sessionNativeFileJournal.records.map((record) => (
+                <li key={record.session_id}>
+                  {record.agent_name} · {record.title ?? record.session_id} · payloads {record.written_payloads.length} · target {record.target_project ?? 'none'} · {record.note}
+                  <ul>
+                    {record.written_payloads.map((payload) => (
+                      <li key={`${record.session_id}:${payload.portable_path}`}>
+                        {payload.status} · {payload.project_identity_rewritten ? 'rewritten' : 'copied'} · {payload.portable_path} → {payload.target_path || 'blocked'}{payload.backup_path ? ` · backup ${payload.backup_path}` : ''}{payload.message ? ` · ${payload.message}` : ''}
+                      </li>
                     ))}
                   </ul>
                 </li>
