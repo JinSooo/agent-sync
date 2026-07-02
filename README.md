@@ -23,7 +23,7 @@ The older Node CLI remains available as a legacy reference while the Rust/Tauri 
 ## What works now
 
 - Scan local Codex and Claude Code surfaces without printing file contents, including adapter capabilities that drive UI availability.
-- Export a verified `.asbundle` containing the source snapshot, safe text payloads, explicitly selected memory/MCP review payloads, metadata-only session archive entries, and explicitly selected raw session payloads.
+- Export a verified `.asbundle` containing the source snapshot, safe text payloads, explicitly selected memory/MCP review payloads, metadata-only session archive entries, and explicitly selected raw session payloads. Sensitive memory/MCP and raw session payload export requires an explicit unencrypted-payload acknowledgement until real bundle encryption is implemented.
 - Import and verify a remote `.asbundle` in the desktop UI.
 - Create a remote-to-local transform plan.
 - Show project mapping confidence by normalized git remote, directory basename, or manual fallback, while clearly warning when the adapter does not support DB/index-level project remap.
@@ -47,7 +47,7 @@ cargo run -p agent_sync_cli -- scan
 cargo run -p agent_sync_cli -- bundle-manifest
 cargo run -p agent_sync_cli -- export-bundle --output agent-sync-local.asbundle
 cargo run -p agent_sync_cli -- export-bundle --output agent-sync-review.asbundle --payload "codex:~/.codex/memories/guide.md" --payload "claude:~/.claude/mcp.json"
-cargo run -p agent_sync_cli -- export-bundle --output agent-sync-sessions.asbundle --max-depth 8 --max-entries 5000 --include-session-payloads --session "codex:~/.codex/sessions/YYYY/MM/DD/session.jsonl"
+cargo run -p agent_sync_cli -- export-bundle --output agent-sync-sessions.asbundle --max-depth 8 --max-entries 5000 --include-session-payloads --session "codex:~/.codex/sessions/YYYY/MM/DD/session.jsonl" --allow-unencrypted-sensitive-payloads
 cargo run -p agent_sync_cli -- verify-bundle --input agent-sync-local.asbundle
 cargo run -p agent_sync_cli -- check-native-sessions --input agent-sync-sessions.asbundle --home "$HOME" --project "$PWD"
 cargo run -p agent_sync_cli -- import-native-sessions --input agent-sync-sessions.asbundle --target-home "$HOME" --target-project "$PWD" --backup-dir agent-sync-backups --session "codex:~/.codex/sessions/YYYY/MM/DD/session.jsonl"
@@ -82,6 +82,8 @@ Review-required by default:
 - MCP configs
 - hooks/scripts/commands
 - memory/rules/skills/prompts/agents
+
+Sensitive raw payloads are not encrypted yet. Exporting memory/MCP review payloads or raw session payloads therefore requires an explicit UI acknowledgement or CLI `--allow-unencrypted-sensitive-payloads`.
 
 Automatically applicable today:
 

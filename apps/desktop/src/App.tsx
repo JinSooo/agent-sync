@@ -316,6 +316,7 @@ export function App() {
   const [selectedLocalSessionIds, setSelectedLocalSessionIds] = useState<string[]>([]);
   const [selectedLocalReviewPayloadKeys, setSelectedLocalReviewPayloadKeys] = useState<string[]>([]);
   const [reviewApplyAcknowledged, setReviewApplyAcknowledged] = useState(false);
+  const [allowUnencryptedSensitiveExport, setAllowUnencryptedSensitiveExport] = useState(false);
   const [storeMessage, setStoreMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -346,6 +347,7 @@ export function App() {
       setStoreMessage(null);
       setSelectedLocalSessionIds([]);
       setSelectedLocalReviewPayloadKeys([]);
+      setAllowUnencryptedSensitiveExport(false);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -379,7 +381,8 @@ export function App() {
         selectedReviewPayloads: selectedLocalReviewPayloadKeys.map(payloadKeyToSelection),
         includeSessionPayloads: selectedLocalSessionIds.length > 0,
         selectedSessionIds: selectedLocalSessionIds,
-        maxSessionPayloadBytes: 2 * 1024 * 1024
+        maxSessionPayloadBytes: 2 * 1024 * 1024,
+        allowUnencryptedSensitivePayloads: allowUnencryptedSensitiveExport
       });
       setBundleManifest(manifest);
       setBundlePath(exportPath);
@@ -723,6 +726,7 @@ export function App() {
       .map((finding) => ({ agent, finding, key: payloadSelectionKey(agent.id, finding.portable_path) }))),
     [agents]
   );
+  const sensitiveLocalPayloadSelected = selectedLocalReviewPayloadKeys.length > 0 || selectedLocalSessionIds.length > 0;
   const selectedOperations = useMemo(() => (plan ? plan.operations.filter((operation) => selectedOperationIds.includes(operation.id)) : []), [plan, selectedOperationIds]);
   const selectedReviewOperations = useMemo(() => selectedOperations.filter(isReviewPayloadApplicable), [selectedOperations]);
   const autoApplicableCount = plan?.operations.filter(isAutoApplicable).length ?? 0;
@@ -860,7 +864,7 @@ export function App() {
                 <input value={exportPath} onChange={(event) => setExportPath(event.target.value)} />
               </label>
               <button className="secondary" onClick={chooseExportPath} disabled={busy}>Choose export path…</button>
-              <button className="secondary" onClick={exportBundle} disabled={!snapshot || busy}>Export local bundle</button>
+              <button className="secondary" onClick={exportBundle} disabled={!snapshot || busy || (sensitiveLocalPayloadSelected && !allowUnencryptedSensitiveExport)}>Export local bundle</button>
               <label>
                 Import bundle path
                 <input value={bundlePath} onChange={(event) => setBundlePath(event.target.value)} />
@@ -869,6 +873,12 @@ export function App() {
               <button className="secondary" onClick={importBundle} disabled={busy || !bundlePath}>Import + verify bundle</button>
               <button onClick={createImportPlan} disabled={!snapshot || !remoteSnapshot || busy}>Plan remote → local</button>
             </div>
+            {sensitiveLocalPayloadSelected && (
+              <label className="ackBox">
+                <input type="checkbox" checked={allowUnencryptedSensitiveExport} onChange={(event) => setAllowUnencryptedSensitiveExport(event.target.checked)} />
+                I understand selected memory/MCP or raw session payloads are currently exported as unencrypted bundle payloads. Use only trusted storage/transport until real bundle encryption is implemented.
+              </label>
+            )}
           </section>
         </section>
 

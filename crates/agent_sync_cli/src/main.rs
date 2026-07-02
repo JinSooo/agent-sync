@@ -52,6 +52,9 @@ fn main() -> anyhow::Result<()> {
                     include_session_payloads,
                     selected_session_ids,
                     max_session_payload_bytes: 2 * 1024 * 1024,
+                    allow_unencrypted_sensitive_payloads: args
+                        .iter()
+                        .any(|arg| arg == "--allow-unencrypted-sensitive-payloads"),
                 },
             )?;
             write_bundle_file(&bundle, &output)?;
@@ -147,7 +150,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|check-native-sessions|import-native-sessions|rollback-journal|rollback-native-session-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
+                "usage: agent-sync-rs [scan|bundle-manifest|export-bundle|verify-bundle|check-native-sessions|import-native-sessions|rollback-journal|rollback-native-session-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
             );
             std::process::exit(2);
         }

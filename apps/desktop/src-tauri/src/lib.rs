@@ -76,6 +76,7 @@ fn export_bundle_file(
     include_session_payloads: Option<bool>,
     selected_session_ids: Option<Vec<String>>,
     max_session_payload_bytes: Option<u64>,
+    allow_unencrypted_sensitive_payloads: Option<bool>,
 ) -> Result<SyncBundleManifest, String> {
     let home = home
         .map(PathBuf::from)
@@ -95,6 +96,8 @@ fn export_bundle_file(
             include_session_payloads: include_session_payloads.unwrap_or(false),
             selected_session_ids: selected_session_ids.unwrap_or_default(),
             max_session_payload_bytes: max_session_payload_bytes.unwrap_or(2 * 1024 * 1024),
+            allow_unencrypted_sensitive_payloads: allow_unencrypted_sensitive_payloads
+                .unwrap_or(false),
         },
     )
     .map_err(|error| error.to_string())?;

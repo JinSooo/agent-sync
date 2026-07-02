@@ -83,6 +83,7 @@ pub struct BundleExportOptions {
     pub include_session_payloads: bool,
     pub selected_session_ids: Vec<String>,
     pub max_session_payload_bytes: u64,
+    pub allow_unencrypted_sensitive_payloads: bool,
 }
 
 pub fn manifest_from_snapshot(snapshot: &DeviceSnapshot) -> SyncBundleManifest {
@@ -95,8 +96,8 @@ pub fn manifest_from_snapshot(snapshot: &DeviceSnapshot) -> SyncBundleManifest {
         selections,
         redactions,
         encryption: BundleEncryptionInfo {
-            required_for_sensitive_payloads: true,
-            method: "planned:xchacha20-poly1305".to_string(),
+            required_for_sensitive_payloads: false,
+            method: "none:not_required_for_manifest_preview".to_string(),
         },
     }
 }
@@ -105,7 +106,21 @@ pub fn export_bundle(
     snapshot: &DeviceSnapshot,
     options: &BundleExportOptions,
 ) -> std::io::Result<SyncBundle> {
+    let sensitive_payload_requested = sensitive_payload_requested(snapshot, options);
+    if sensitive_payload_requested && !options.allow_unencrypted_sensitive_payloads {
+        return Err(std::io::Error::other(
+            "selected memory/MCP or raw session payloads are sensitive and currently exported as unencrypted bundle payloads; pass explicit unencrypted export acknowledgement or deselect them",
+        ));
+    }
     let mut manifest = manifest_from_snapshot(snapshot);
+    manifest.encryption = BundleEncryptionInfo {
+        required_for_sensitive_payloads: sensitive_payload_requested,
+        method: if sensitive_payload_requested {
+            "none:explicit_unencrypted_sensitive_payloads".to_string()
+        } else {
+            "none:not_required_for_selected_payloads".to_string()
+        },
+    };
     for selection in &mut manifest.selections {
         if is_explicit_review_payload(selection, &options.selected_review_payloads) {
             selection.include_payload = true;
@@ -218,6 +233,21 @@ fn is_explicit_review_payload(
     ) && selected_review_payloads.iter().any(|selected| {
         selected.agent_id == selection.agent_id && selected.portable_path == selection.portable_path
     })
+}
+
+fn sensitive_payload_requested(snapshot: &DeviceSnapshot, options: &BundleExportOptions) -> bool {
+    let review_payload_requested = !options.selected_review_payloads.is_empty();
+    let session_payload_requested = if !options.include_session_payloads {
+        false
+    } else if options.selected_session_ids.is_empty() {
+        snapshot
+            .agents
+            .iter()
+            .any(|agent| !agent.sessions.is_empty())
+    } else {
+        !options.selected_session_ids.is_empty()
+    };
+    review_payload_requested || session_payload_requested
 }
 
 fn session_archives_from_snapshot(
@@ -421,6 +451,7 @@ mod tests {
                 include_session_payloads: false,
                 selected_session_ids: vec![],
                 max_session_payload_bytes: 1024,
+                allow_unencrypted_sensitive_payloads: false,
             },
         )
         .unwrap();
@@ -503,11 +534,27 @@ mod tests {
                 include_session_payloads: false,
                 selected_session_ids: vec!["codex:session-1".into()],
                 max_session_payload_bytes: 1024,
+                allow_unencrypted_sensitive_payloads: false,
             },
         )
         .unwrap();
         assert!(!metadata_only.session_archives[0].payload_included);
         assert!(metadata_only.session_archives[0].payloads.is_empty());
+
+        let without_sensitive_ack = export_bundle(
+            &snapshot,
+            &BundleExportOptions {
+                home: home.clone(),
+                project: project.clone(),
+                max_payload_bytes: 1024,
+                selected_review_payloads: vec![],
+                include_session_payloads: true,
+                selected_session_ids: vec!["codex:session-1".into()],
+                max_session_payload_bytes: 1024,
+                allow_unencrypted_sensitive_payloads: false,
+            },
+        );
+        assert!(without_sensitive_ack.is_err());
 
         let with_payload = export_bundle(
             &snapshot,
@@ -519,6 +566,7 @@ mod tests {
                 include_session_payloads: true,
                 selected_session_ids: vec!["codex:session-1".into()],
                 max_session_payload_bytes: 1024,
+                allow_unencrypted_sensitive_payloads: true,
             },
         )
         .unwrap();
@@ -589,11 +637,30 @@ mod tests {
                 include_session_payloads: false,
                 selected_session_ids: vec![],
                 max_session_payload_bytes: 1024,
+                allow_unencrypted_sensitive_payloads: false,
             },
         )
         .unwrap();
         assert!(metadata_only.payloads.is_empty());
         assert!(!metadata_only.manifest.selections[0].include_payload);
+
+        let without_sensitive_ack = export_bundle(
+            &snapshot,
+            &BundleExportOptions {
+                home: home.clone(),
+                project: project.clone(),
+                max_payload_bytes: 1024,
+                selected_review_payloads: vec![PayloadSelectionRef {
+                    agent_id: "codex".into(),
+                    portable_path: "~/.codex/memories/guide.md".into(),
+                }],
+                include_session_payloads: false,
+                selected_session_ids: vec![],
+                max_session_payload_bytes: 1024,
+                allow_unencrypted_sensitive_payloads: false,
+            },
+        );
+        assert!(without_sensitive_ack.is_err());
 
         let with_payload = export_bundle(
             &snapshot,
@@ -608,6 +675,7 @@ mod tests {
                 include_session_payloads: false,
                 selected_session_ids: vec![],
                 max_session_payload_bytes: 1024,
+                allow_unencrypted_sensitive_payloads: true,
             },
         )
         .unwrap();
