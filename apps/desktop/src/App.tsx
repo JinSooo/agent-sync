@@ -390,6 +390,7 @@ export function App() {
   const [allowUnencryptedSensitiveExport, setAllowUnencryptedSensitiveExport] = useState(false);
   const [bundlePassphrase, setBundlePassphrase] = useState('');
   const [bundleKeyPath, setBundleKeyPath] = useState('');
+  const [bundleRecipientInputs, setBundleRecipientInputs] = useState('');
   const [storeMessage, setStoreMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -453,6 +454,7 @@ export function App() {
     try {
       const encryptionPassphrase = bundlePassphrase.length > 0 ? bundlePassphrase : undefined;
       const encryptionKeyPath = bundleKeyPath.length > 0 ? bundleKeyPath : undefined;
+      const encryptionRecipientInputs = bundleRecipientInputsToArray(bundleRecipientInputs);
       const manifest = await invoke<SyncBundleManifest>('export_bundle_file', {
         snapshot,
         output: exportPath,
@@ -463,7 +465,8 @@ export function App() {
         maxSessionPayloadBytes: 2 * 1024 * 1024,
         allowUnencryptedSensitivePayloads: allowUnencryptedSensitiveExport,
         encryptionPassphrase,
-        encryptionKeyPath
+        encryptionKeyPath,
+        encryptionRecipientInputs
       });
       setBundleManifest(manifest);
       setBundlePath(exportPath);
@@ -875,6 +878,17 @@ export function App() {
     if (path) setBundleKeyPath(path);
   }
 
+  async function chooseBundleRecipientPath() {
+    const selected = await open({
+      multiple: true,
+      filters: [{ name: 'Agent Sync Public Recipient', extensions: ['json'] }]
+    });
+    const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
+    if (paths.length > 0) {
+      setBundleRecipientInputs((current) => [...bundleRecipientInputsToArray(current), ...paths].join('\n'));
+    }
+  }
+
   async function generateBundleKey() {
     const selected = await save({
       defaultPath: bundleKeyPath || 'agent-sync-device-key.json',
@@ -887,6 +901,29 @@ export function App() {
       const key = await invoke<BundleDeviceKeySummary>('generate_bundle_key_file', { output: selected });
       setBundleKeyPath(selected);
       setStoreMessage(`bundle key generated: ${key.id}`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportBundleRecipient() {
+    if (!bundleKeyPath) {
+      setError('Choose or generate a private bundle key file first.');
+      return;
+    }
+    const selected = await save({
+      defaultPath: 'agent-sync-recipient.json',
+      filters: [{ name: 'Agent Sync Public Recipient', extensions: ['json'] }]
+    });
+    if (!selected) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const recipient = await invoke<BundleDeviceKeySummary>('export_bundle_recipient_file', { keyPath: bundleKeyPath, output: selected });
+      setBundleRecipientInputs((current) => [...bundleRecipientInputsToArray(current), selected].join('\n'));
+      setStoreMessage(`public recipient exported: ${recipient.id}`);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -962,8 +999,9 @@ export function App() {
   const sensitiveLocalPayloadSelected = selectedLocalReviewPayloadKeys.length > 0 || selectedLocalSessionIds.length > 0;
   const bundlePassphraseProvided = bundlePassphrase.length > 0;
   const bundleKeyProvided = bundleKeyPath.length > 0;
-  const bundleEncryptionInputConflict = bundlePassphraseProvided && bundleKeyProvided;
-  const bundleEncryptedExportSelected = bundlePassphraseProvided || bundleKeyProvided;
+  const bundleRecipientsProvided = bundleRecipientInputsToArray(bundleRecipientInputs).length > 0;
+  const bundleEncryptionInputConflict = bundlePassphraseProvided && (bundleKeyProvided || bundleRecipientsProvided);
+  const bundleEncryptedExportSelected = bundlePassphraseProvided || bundleKeyProvided || bundleRecipientsProvided;
   const selectedOperations = useMemo(() => (plan ? plan.operations.filter((operation) => selectedOperationIds.includes(operation.id)) : []), [plan, selectedOperationIds]);
   const selectedReviewOperations = useMemo(() => selectedOperations.filter(isReviewPayloadApplicable), [selectedOperations]);
   const autoApplicableCount = plan?.operations.filter(isAutoApplicable).length ?? 0;
@@ -1112,11 +1150,17 @@ export function App() {
                 <input type="password" value={bundlePassphrase} onChange={(event) => setBundlePassphrase(event.target.value)} placeholder="encrypt export / decrypt import" />
               </label>
               <label>
-                Bundle key file
+                Bundle private key file
                 <input value={bundleKeyPath} onChange={(event) => setBundleKeyPath(event.target.value)} placeholder="agent-sync-device-key.json" />
               </label>
               <button className="secondary" onClick={chooseBundleKeyPath} disabled={busy}>Choose key…</button>
               <button className="secondary" onClick={generateBundleKey} disabled={busy}>Generate key…</button>
+              <button className="secondary" onClick={exportBundleRecipient} disabled={busy || !bundleKeyPath}>Export public recipient…</button>
+              <label>
+                Additional public recipients
+                <textarea value={bundleRecipientInputs} onChange={(event) => setBundleRecipientInputs(event.target.value)} placeholder="one age1... recipient or agent-sync-recipient.json path per line" />
+              </label>
+              <button className="secondary" onClick={chooseBundleRecipientPath} disabled={busy}>Choose recipient…</button>
               <button className="secondary" onClick={exportBundle} disabled={!snapshot || busy || bundleEncryptionInputConflict || (sensitiveLocalPayloadSelected && !bundleEncryptedExportSelected && !allowUnencryptedSensitiveExport)}>Export local bundle</button>
               <label>
                 Import bundle path
@@ -1127,7 +1171,7 @@ export function App() {
               <button onClick={createImportPlan} disabled={!snapshot || !remoteSnapshot || busy}>Plan remote → local</button>
             </div>
             {bundleEncryptionInputConflict && (
-              <p className="notice">Use either a bundle passphrase or a bundle key file, not both.</p>
+              <p className="notice">Use either a bundle passphrase or device/public-recipient encryption, not both.</p>
             )}
             {sensitiveLocalPayloadSelected && !bundleEncryptedExportSelected && (
               <label className="ackBox">
@@ -1649,6 +1693,13 @@ function withSelectedOperations(plan: TransformPlan, selectedIds: string[]): Tra
 function singlePath(path: string | string[] | null): string | null {
   if (Array.isArray(path)) return path[0] ?? null;
   return path;
+}
+
+function bundleRecipientInputsToArray(value: string): string[] {
+  return value
+    .split(/[\n,;]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function payloadSelectionKey(agentId: string, portablePath: string): string {

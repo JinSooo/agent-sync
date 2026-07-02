@@ -10,9 +10,10 @@ use agent_sync_apply::{
 };
 use agent_sync_bundle::{
     BundleDeviceKeySummary, BundleExportOptions, BundleFileDecryptionOptions,
-    BundleFileEncryptionOptions, PayloadSelectionRef, export_bundle,
+    BundleFileEncryptionOptions, PayloadSelectionRef, bundle_recipient_from_input, export_bundle,
     generate_bundle_device_key_file, manifest_from_snapshot, read_bundle_device_key_file,
     read_bundle_file_with_decryption, verify_bundle, write_bundle_file_with_encryption,
+    write_bundle_recipient_file,
 };
 use agent_sync_scan::{ScanOptions, scan_device};
 use agent_sync_transform::create_transform_plan;
@@ -48,6 +49,16 @@ fn main() -> anyhow::Result<()> {
                 serde_json::to_string_pretty(&BundleDeviceKeySummary::from(&key))?
             );
         }
+        "export-bundle-recipient" => {
+            let key_path = bundle_key_path(&args)
+                .ok_or_else(|| anyhow::anyhow!("--bundle-key PATH is required"))?;
+            let key = read_bundle_device_key_file(key_path)?;
+            let recipient = BundleDeviceKeySummary::from(&key);
+            if let Some(output) = value_after(&args, "--output") {
+                write_bundle_recipient_file(&recipient, output)?;
+            }
+            println!("{}", serde_json::to_string_pretty(&recipient)?);
+        }
         "export-bundle" => {
             let output =
                 value_after(&args, "--output").unwrap_or_else(|| "agent-sync.asbundle".to_string());
@@ -72,7 +83,7 @@ fn main() -> anyhow::Result<()> {
                         .iter()
                         .any(|arg| arg == "--allow-unencrypted-sensitive-payloads"),
                     encryption_passphrase: encryption.passphrase.clone(),
-                    encryption_recipient: encryption.recipient.clone(),
+                    encryption_recipients: encryption.recipients.clone(),
                 },
             )?;
             write_bundle_file_with_encryption(&bundle, &output, &encryption)?;
@@ -232,7 +243,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
+                "usage: agent-sync-rs [scan|bundle-manifest|generate-bundle-key|export-bundle-recipient|export-bundle|verify-bundle|check-native-sessions|discover-native-stores|preview-native-remap|apply-native-remap|import-native-sessions|rollback-journal|rollback-native-session-journal|rollback-native-remap-journal|self-plan] [--home PATH] [--project PATH] [--max-depth N] [--max-entries N] [--max-schema-tables N] [--source-project PATH] [--candidate 'AGENT_ID|PORTABLE_PATH|TABLE|COLUMN'] [--output PATH] [--input PATH] [--payload AGENT_ID:PORTABLE_PATH] [--include-session-payloads --session SESSION_ID --bundle-passphrase PASSPHRASE|--bundle-key PATH|--bundle-recipient AGE_OR_JSON --allow-unencrypted-sensitive-payloads] [--target-home PATH --target-project PATH --backup-dir PATH --no-rewrite-project-identity] [--skip-agent-stopped-check] [--no-target-scan]"
             );
             std::process::exit(2);
         }
@@ -316,12 +327,21 @@ fn bundle_file_encryption_options(args: &[String]) -> anyhow::Result<BundleFileE
     let key = bundle_key_path(args)
         .map(read_bundle_device_key_file)
         .transpose()?;
-    if passphrase.is_some() && key.is_some() {
-        anyhow::bail!("--bundle-passphrase and --bundle-key are mutually exclusive");
+    let mut recipients = Vec::new();
+    if let Some(key) = key {
+        recipients.push(key.age_recipient);
+    }
+    for input in values_after(args, "--bundle-recipient") {
+        recipients.push(bundle_recipient_from_input(&input)?);
+    }
+    if passphrase.is_some() && !recipients.is_empty() {
+        anyhow::bail!(
+            "--bundle-passphrase is mutually exclusive with --bundle-key/--bundle-recipient"
+        );
     }
     Ok(BundleFileEncryptionOptions {
         passphrase,
-        recipient: key.map(|key| key.age_recipient),
+        recipients,
     })
 }
 

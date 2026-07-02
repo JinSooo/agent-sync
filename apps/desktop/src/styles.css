@@ -58,8 +58,9 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .actions.vertical { flex-direction: column; align-items: stretch; min-width: 190px; }
 .formGrid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .formGrid label { display: grid; gap: 7px; color: #9fb1ca; font-size: 12px; }
-input { width: 100%; border: 1px solid rgba(255,255,255,.12); border-radius: 12px; background: rgba(2,6,23,.55); color: #e5edf7; padding: 11px 12px; outline: none; }
-input:focus { border-color: rgba(110,231,255,.55); box-shadow: 0 0 0 3px rgba(110,231,255,.10); }
+input, textarea { width: 100%; border: 1px solid rgba(255,255,255,.12); border-radius: 12px; background: rgba(2,6,23,.55); color: #e5edf7; padding: 11px 12px; outline: none; }
+textarea { min-height: 78px; resize: vertical; font-family: inherit; }
+input:focus, textarea:focus { border-color: rgba(110,231,255,.55); box-shadow: 0 0 0 3px rgba(110,231,255,.10); }
 .spaced { margin-top: 16px; }
 .mappingCard { display: grid; gap: 8px; padding: 14px; border-radius: 16px; background: rgba(255,255,255,.045); border: 1px solid rgba(255,255,255,.07); }
 .mappingHeader { display: flex; justify-content: space-between; gap: 16px; align-items: center; }

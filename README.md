@@ -23,7 +23,7 @@ The older Node CLI remains available as a legacy reference while the Rust/Tauri 
 ## What works now
 
 - Scan local Codex and Claude Code surfaces without printing file contents, including adapter capabilities that drive UI availability.
-- Export a verified `.asbundle` containing the source snapshot, safe text payloads, explicitly selected memory/MCP review payloads, metadata-only session archive entries, and explicitly selected raw session payloads. Sensitive memory/MCP and raw session payload export is protected with age encryption when either a passphrase or shared Agent Sync device key file is provided; unencrypted sensitive export still requires an explicit acknowledgement.
+- Export a verified `.asbundle` containing the source snapshot, safe text payloads, explicitly selected memory/MCP review payloads, metadata-only session archive entries, and explicitly selected raw session payloads. Sensitive memory/MCP and raw session payload export is protected with age encryption when either a passphrase, local device key, or one/more public recipient files are provided; unencrypted sensitive export still requires an explicit acknowledgement.
 - Import and verify a remote `.asbundle` in the desktop UI.
 - Create a remote-to-local transform plan.
 - Show project mapping confidence by normalized git remote, directory basename, or manual fallback, while clearly warning when the adapter does not support DB/index-level project remap.
@@ -49,9 +49,10 @@ cargo test --workspace
 cargo run -p agent_sync_cli -- scan
 cargo run -p agent_sync_cli -- bundle-manifest
 cargo run -p agent_sync_cli -- generate-bundle-key --output agent-sync-device-key.json
+cargo run -p agent_sync_cli -- export-bundle-recipient --bundle-key agent-sync-device-key.json --output agent-sync-recipient.json
 cargo run -p agent_sync_cli -- export-bundle --output agent-sync-local.asbundle
 cargo run -p agent_sync_cli -- export-bundle --output agent-sync-review.asbundle --payload "codex:~/.codex/memories/guide.md" --payload "claude:~/.claude/mcp.json" --bundle-key agent-sync-device-key.json
-cargo run -p agent_sync_cli -- export-bundle --output agent-sync-sessions.asbundle --max-depth 8 --max-entries 5000 --include-session-payloads --session "codex:~/.codex/sessions/YYYY/MM/DD/session.jsonl" --bundle-key agent-sync-device-key.json
+cargo run -p agent_sync_cli -- export-bundle --output agent-sync-sessions.asbundle --max-depth 8 --max-entries 5000 --include-session-payloads --session "codex:~/.codex/sessions/YYYY/MM/DD/session.jsonl" --bundle-key agent-sync-device-key.json --bundle-recipient windows-agent-sync-recipient.json
 AGENT_SYNC_BUNDLE_KEY="agent-sync-device-key.json" cargo run -p agent_sync_cli -- verify-bundle --input agent-sync-sessions.asbundle
 AGENT_SYNC_BUNDLE_KEY="agent-sync-device-key.json" cargo run -p agent_sync_cli -- check-native-sessions --input agent-sync-sessions.asbundle --home "$HOME" --project "$PWD"
 cargo run -p agent_sync_cli -- discover-native-stores --home "$HOME" --project "$PWD" --max-depth 8 --max-entries 5000
@@ -91,7 +92,7 @@ Review-required by default:
 - hooks/scripts/commands
 - memory/rules/skills/prompts/agents
 
-Sensitive raw payloads are encrypted at the whole-bundle file boundary when a passphrase or Agent Sync device key file is provided. Use the desktop Bundle passphrase field, desktop Bundle key file picker, CLI `--bundle-passphrase` / `AGENT_SYNC_BUNDLE_PASSPHRASE`, or CLI `--bundle-key` / `AGENT_SYNC_BUNDLE_KEY`; importing, verifying, checking, or native-importing an encrypted bundle requires the same passphrase or key file. The key file contains an age identity and should be stored/transferred like a secret. Exporting memory/MCP review payloads or raw session payloads without a passphrase or key file still requires an explicit UI acknowledgement or CLI `--allow-unencrypted-sensitive-payloads`.
+Sensitive raw payloads are encrypted at the whole-bundle file boundary when a passphrase, Agent Sync device key file, or public recipient is provided. Use the desktop Bundle passphrase field, desktop private key picker, desktop public recipient list, CLI `--bundle-passphrase` / `AGENT_SYNC_BUNDLE_PASSPHRASE`, CLI `--bundle-key` / `AGENT_SYNC_BUNDLE_KEY`, or repeated CLI `--bundle-recipient AGE_OR_JSON`. Importing, verifying, checking, or native-importing an encrypted bundle requires the matching passphrase or private key file. The private key file contains an age identity and should be stored/transferred like a secret; public recipient files contain only the age recipient and are safe to share with the exporting device. Exporting memory/MCP review payloads or raw session payloads without encryption still requires an explicit UI acknowledgement or CLI `--allow-unencrypted-sensitive-payloads`.
 
 Automatically applicable today:
 

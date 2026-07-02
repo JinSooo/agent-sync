@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -117,13 +118,13 @@ pub struct BundleExportOptions {
     pub max_session_payload_bytes: u64,
     pub allow_unencrypted_sensitive_payloads: bool,
     pub encryption_passphrase: Option<String>,
-    pub encryption_recipient: Option<String>,
+    pub encryption_recipients: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BundleFileEncryptionOptions {
     pub passphrase: Option<String>,
-    pub recipient: Option<String>,
+    pub recipients: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -155,7 +156,7 @@ pub fn export_bundle(
     let sensitive_payload_requested = sensitive_payload_requested(snapshot, options);
     let encryption_method = selected_encryption_method(
         options.encryption_passphrase.as_deref(),
-        options.encryption_recipient.as_deref(),
+        &options.encryption_recipients,
     )?;
     let encrypted_export = encryption_method.is_some();
     if sensitive_payload_requested
@@ -233,7 +234,7 @@ pub fn write_bundle_file_with_passphrase(
         path,
         &BundleFileEncryptionOptions {
             passphrase: passphrase.map(ToOwned::to_owned),
-            recipient: None,
+            recipients: Vec::new(),
         },
     )
 }
@@ -243,14 +244,14 @@ pub fn write_bundle_file_with_encryption(
     path: impl AsRef<Path>,
     options: &BundleFileEncryptionOptions,
 ) -> std::io::Result<()> {
-    selected_encryption_method(options.passphrase.as_deref(), options.recipient.as_deref())?;
+    selected_encryption_method(options.passphrase.as_deref(), &options.recipients)?;
     let json = serde_json::to_vec_pretty(bundle).map_err(std::io::Error::other)?;
     let bytes = match (
         normalized_passphrase(options.passphrase.as_deref()),
-        normalized_nonempty(options.recipient.as_deref()),
+        normalized_recipients(&options.recipients),
     ) {
         (Some(passphrase), None) => encrypt_bundle_bytes(&json, passphrase)?,
-        (None, Some(recipient)) => encrypt_bundle_bytes_to_recipient(&json, recipient)?,
+        (None, Some(recipients)) => encrypt_bundle_bytes_to_recipients(&json, &recipients)?,
         (None, None) => json,
         (Some(_), Some(_)) => unreachable!("selected_encryption_method rejects mixed encryption"),
     };
@@ -333,20 +334,25 @@ fn normalized_passphrase(passphrase: Option<&str>) -> Option<&str> {
     passphrase.filter(|value| !value.is_empty())
 }
 
-fn normalized_nonempty(value: Option<&str>) -> Option<&str> {
-    value.filter(|value| !value.is_empty())
+fn normalized_recipients(recipients: &[String]) -> Option<Vec<&str>> {
+    let recipients = recipients
+        .iter()
+        .map(|recipient| recipient.trim())
+        .filter(|recipient| !recipient.is_empty())
+        .collect::<Vec<_>>();
+    (!recipients.is_empty()).then_some(recipients)
 }
 
 fn selected_encryption_method<'a>(
     passphrase: Option<&'a str>,
-    recipient: Option<&'a str>,
+    recipients: &[String],
 ) -> std::io::Result<Option<&'static str>> {
     let has_passphrase = normalized_passphrase(passphrase).is_some();
-    let has_recipient = normalized_nonempty(recipient).is_some();
-    match (has_passphrase, has_recipient) {
+    let has_recipients = normalized_recipients(recipients).is_some();
+    match (has_passphrase, has_recipients) {
         (true, true) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "bundle passphrase and bundle key recipient are mutually exclusive",
+            "bundle passphrase and bundle key recipients are mutually exclusive",
         )),
         (true, false) => Ok(Some(BUNDLE_ENCRYPTION_METHOD_AGE_SCRYPT)),
         (false, true) => Ok(Some(BUNDLE_ENCRYPTION_METHOD_AGE_X25519)),
@@ -360,12 +366,25 @@ fn encrypt_bundle_bytes(plaintext: &[u8], passphrase: &str) -> std::io::Result<V
     age::encrypt(&recipient, plaintext).map_err(std::io::Error::other)
 }
 
-fn encrypt_bundle_bytes_to_recipient(
+fn encrypt_bundle_bytes_to_recipients(
     plaintext: &[u8],
-    recipient: &str,
+    recipients: &[&str],
 ) -> std::io::Result<Vec<u8>> {
-    let recipient = parse_age_recipient(recipient)?;
-    age::encrypt(&recipient, plaintext).map_err(std::io::Error::other)
+    let recipients = recipients
+        .iter()
+        .map(|recipient| parse_age_recipient(recipient))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let encryptor = age::Encryptor::with_recipients(
+        recipients
+            .iter()
+            .map(|recipient| recipient as &dyn age::Recipient),
+    )
+    .map_err(std::io::Error::other)?;
+    let mut ciphertext = Vec::with_capacity(plaintext.len());
+    let mut writer = encryptor.wrap_output(&mut ciphertext)?;
+    writer.write_all(plaintext)?;
+    writer.finish()?;
+    Ok(ciphertext)
 }
 
 fn decrypt_bundle_bytes(ciphertext: &[u8], passphrase: &str) -> std::io::Result<Vec<u8>> {
@@ -448,12 +467,46 @@ pub fn generate_bundle_device_key_file(path: impl AsRef<Path>) -> std::io::Resul
     Ok(key)
 }
 
+pub fn write_bundle_recipient_file(
+    recipient: &BundleDeviceKeySummary,
+    path: impl AsRef<Path>,
+) -> std::io::Result<()> {
+    let json = serde_json::to_vec_pretty(recipient).map_err(std::io::Error::other)?;
+    fs::write(path, json)
+}
+
 pub fn read_bundle_device_key_file(path: impl AsRef<Path>) -> std::io::Result<BundleDeviceKey> {
     let bytes = fs::read(path)?;
     let key: BundleDeviceKey = serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
     parse_age_recipient(&key.age_recipient)?;
     parse_age_identity(&key.age_identity)?;
     Ok(key)
+}
+
+pub fn read_bundle_recipient_file(
+    path: impl AsRef<Path>,
+) -> std::io::Result<BundleDeviceKeySummary> {
+    let bytes = fs::read(path)?;
+    let recipient: BundleDeviceKeySummary =
+        serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
+    parse_age_recipient(&recipient.age_recipient)?;
+    Ok(recipient)
+}
+
+pub fn bundle_recipient_from_input(input: &str) -> std::io::Result<String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "empty bundle recipient",
+        ));
+    }
+    if input.starts_with("age1") {
+        parse_age_recipient(input)?;
+        Ok(input.to_string())
+    } else {
+        read_bundle_recipient_file(input).map(|recipient| recipient.age_recipient)
+    }
 }
 
 #[cfg(unix)]
@@ -721,7 +774,7 @@ mod tests {
                 max_session_payload_bytes: 1024,
                 allow_unencrypted_sensitive_payloads: false,
                 encryption_passphrase: None,
-                encryption_recipient: None,
+                encryption_recipients: vec![],
             },
         )
         .unwrap();
@@ -806,7 +859,7 @@ mod tests {
                 max_session_payload_bytes: 1024,
                 allow_unencrypted_sensitive_payloads: false,
                 encryption_passphrase: None,
-                encryption_recipient: None,
+                encryption_recipients: vec![],
             },
         )
         .unwrap();
@@ -825,7 +878,7 @@ mod tests {
                 max_session_payload_bytes: 1024,
                 allow_unencrypted_sensitive_payloads: false,
                 encryption_passphrase: None,
-                encryption_recipient: None,
+                encryption_recipients: vec![],
             },
         );
         assert!(without_sensitive_ack.is_err());
@@ -842,7 +895,7 @@ mod tests {
                 max_session_payload_bytes: 1024,
                 allow_unencrypted_sensitive_payloads: true,
                 encryption_passphrase: None,
-                encryption_recipient: None,
+                encryption_recipients: vec![],
             },
         )
         .unwrap();
@@ -915,7 +968,7 @@ mod tests {
                 max_session_payload_bytes: 1024,
                 allow_unencrypted_sensitive_payloads: false,
                 encryption_passphrase: None,
-                encryption_recipient: None,
+                encryption_recipients: vec![],
             },
         )
         .unwrap();
@@ -937,7 +990,7 @@ mod tests {
                 max_session_payload_bytes: 1024,
                 allow_unencrypted_sensitive_payloads: false,
                 encryption_passphrase: None,
-                encryption_recipient: None,
+                encryption_recipients: vec![],
             },
         );
         assert!(without_sensitive_ack.is_err());
@@ -957,7 +1010,7 @@ mod tests {
                 max_session_payload_bytes: 1024,
                 allow_unencrypted_sensitive_payloads: false,
                 encryption_passphrase: Some("correct horse battery staple".to_string()),
-                encryption_recipient: None,
+                encryption_recipients: vec![],
             },
         )
         .unwrap();
@@ -991,6 +1044,7 @@ mod tests {
         assert_eq!(decrypted, with_encrypted_payload);
 
         let device_key = generate_bundle_device_key();
+        let second_device_key = generate_bundle_device_key();
         let wrong_device_key = generate_bundle_device_key();
         let with_key_payload = export_bundle(
             &snapshot,
@@ -1007,7 +1061,10 @@ mod tests {
                 max_session_payload_bytes: 1024,
                 allow_unencrypted_sensitive_payloads: false,
                 encryption_passphrase: None,
-                encryption_recipient: Some(device_key.age_recipient.clone()),
+                encryption_recipients: vec![
+                    device_key.age_recipient.clone(),
+                    second_device_key.age_recipient.clone(),
+                ],
             },
         )
         .unwrap();
@@ -1021,7 +1078,10 @@ mod tests {
             &keyed_bundle_path,
             &BundleFileEncryptionOptions {
                 passphrase: None,
-                recipient: Some(device_key.age_recipient.clone()),
+                recipients: vec![
+                    device_key.age_recipient.clone(),
+                    second_device_key.age_recipient.clone(),
+                ],
             },
         )
         .unwrap();
@@ -1047,6 +1107,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(keyed_decrypted, with_key_payload);
+        let second_keyed_decrypted = read_bundle_file_with_decryption(
+            &keyed_bundle_path,
+            &BundleFileDecryptionOptions {
+                passphrase: None,
+                identities: vec![second_device_key.age_identity],
+            },
+        )
+        .unwrap();
+        assert_eq!(second_keyed_decrypted, with_key_payload);
 
         let with_payload = export_bundle(
             &snapshot,
@@ -1063,7 +1132,7 @@ mod tests {
                 max_session_payload_bytes: 1024,
                 allow_unencrypted_sensitive_payloads: true,
                 encryption_passphrase: None,
-                encryption_recipient: None,
+                encryption_recipients: vec![],
             },
         )
         .unwrap();
